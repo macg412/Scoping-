@@ -1888,5 +1888,68 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 // ════════════════════════════════════════════════════════
 showLibrary();
 </script>
+<!-- FIELDHUB_BRIDGE_INSTALLED -->
+<script>
+(function(){
+  function applyContext(ctx) {
+    function setVal(id, val) {
+      var el = document.getElementById(id);
+      if (!el || val == null || val === '') return;
+      if (el.value) return;
+      el.value = val;
+      el.dispatchEvent(new Event('input',  { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    var apply = function() {
+      /* Scoping app uses 8-digit numeric only; strip non-digits from WO */
+      var wo = (ctx.wo || '').replace(/\D/g, '').slice(0, 8);
+      setVal('f-number500', wo);
+      setVal('f-jobName',   ctx.name);
+    };
+    if (document.getElementById('f-number500')) apply();
+    else document.addEventListener('DOMContentLoaded', apply);
+  }
+  window.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'JOB_CONTEXT') applyContext(e.data);
+  });
+  if (window.parent !== window) window.parent.postMessage({ type:'EMBED_READY', app:'scoping' }, '*');
+})();
+</script>
+
+<!-- FIELDHUB_SHELL_MODE -->
+<style>
+  /* Field Hub shell mode: hide standalone-app chrome, this is now an embedded module */
+  body.shell-mode .app-header,
+  body.shell-mode #screenHome { display: none !important; }
+  body.shell-mode { background: transparent; }
+</style>
+<script>
+(function(){
+  /* Detect shell mode (parent is the Field Hub) and apply */
+  if (window.parent !== window) {
+    document.documentElement.classList.add('shell-mode');
+    document.addEventListener('DOMContentLoaded', function(){
+      document.body.classList.add('shell-mode');
+      /* When job context arrives, auto-create a new scoping doc and show form */
+      window.addEventListener('message', function(e){
+        if (e.data && e.data.type === 'JOB_CONTEXT_AUTOSTART') {
+          if (typeof newJob === 'function') {
+            try { newJob(); } catch(err) {}
+            /* Pre-fill after newJob runs */
+            setTimeout(function(){
+              var wo = (e.data.wo || '').replace(/\D/g,'').slice(0,8);
+              var n  = e.data.name || '';
+              var f1 = document.getElementById('f-number500');
+              var f2 = document.getElementById('f-jobName');
+              if (f1 && !f1.value) { f1.value = wo; f1.dispatchEvent(new Event('input',{bubbles:true})); }
+              if (f2 && !f2.value) { f2.value = n;  f2.dispatchEvent(new Event('input',{bubbles:true})); }
+            }, 100);
+          }
+        }
+      });
+    });
+  }
+})();
+</script>
 </body>
 </html>
