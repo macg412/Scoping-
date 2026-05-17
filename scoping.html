@@ -258,6 +258,18 @@ let activeJob = null;
 let photoStore = {};     // { jobId: { siteId_photoKey: base64 } }
 let coverPdfStore = {};  // { jobId: { data: base64, name: string, size: number } }
 let confirmCallback = null;
+let _hubDocId = null;    // docId from hub — used for DRAFT_SAVE / SAVE_PDF
+
+// Strip photo base64 from a job object before sending to hub (keeps payload small)
+function jobWithoutPhotos(job) {
+  const stripped = JSON.parse(JSON.stringify(job));
+  const photoKeys = ['p1','p2L','p2P1','p2P2','p3L','p3P1','p3P2'];
+  (stripped.sites||[]).forEach(s => {
+    photoKeys.forEach(k => delete s[k]);
+    (s.extraPages||[]).forEach(ep => photoKeys.forEach(k => delete ep[k]));
+  });
+  return stripped;
+}
 
 try { jobs = JSON.parse(localStorage.getItem('scopingJobs2')||'[]'); } catch(e){}
 try { photoStore = JSON.parse(localStorage.getItem('scopingPhotos2')||'{}'); } catch(e){}
@@ -513,6 +525,9 @@ function saveDraft() {
   const idx=jobs.findIndex(j=>j.id===activeJob.id);
   if(idx>=0) jobs[idx]=activeJob; else jobs.push(activeJob);
   saveStorage();
+  if(_hubDocId && window.parent !== window) {
+    window.parent.postMessage({type:'DRAFT_SAVE',docId:_hubDocId,payload:jobWithoutPhotos(activeJob)},'*');
+  }
   showToast('Draft saved ✓');
 }
 
@@ -1566,47 +1581,46 @@ async function generatePDF(){
 
     const filename=`#${activeJob.number500} - ${activeJob.jobName} - Job pack.pdf`;
 
-    // Get jsPDF output as bytes
+    // Determine final PDF blob (merge with cover if available, otherwise site pages only)
+    let finalBlob = null;
     const sitePagesBytes = pdf.output('arraybuffer');
-
-    // If a cover PDF has been uploaded, prepend it using pdf-lib
     const cover = coverPdfStore[activeJob.id];
     if(cover && window.PDFLib) {
       try {
         const { PDFDocument } = window.PDFLib;
-        // Load both PDFs
         const coverBase64 = cover.data.split(',')[1];
         const coverBytes = Uint8Array.from(atob(coverBase64), c => c.charCodeAt(0));
         const coverDoc = await PDFDocument.load(coverBytes, { ignoreEncryption: true });
         const siteDoc  = await PDFDocument.load(sitePagesBytes);
-
-        // Create merged document
         const mergedDoc = await PDFDocument.create();
-
-        // Copy all pages from cover PDF first
         const coverPages = await mergedDoc.copyPages(coverDoc, coverDoc.getPageIndices());
         coverPages.forEach(p => mergedDoc.addPage(p));
-
-        // Then copy all site pages
         const sitePages = await mergedDoc.copyPages(siteDoc, siteDoc.getPageIndices());
         sitePages.forEach(p => mergedDoc.addPage(p));
-
-        // Save and download
-        const mergedBytes = await mergedDoc.save();
-        const blob = new Blob([mergedBytes], { type: 'application/pdf' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = filename; a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-        showToast('✅ PDF downloaded!');
+        finalBlob = new Blob([await mergedDoc.save()], { type: 'application/pdf' });
       } catch(mergeErr) {
         console.warn('Cover PDF merge failed, saving without cover:', mergeErr);
-        pdf.save(filename);
+        finalBlob = pdf.output('blob');
         showToast('⚠ Cover merge failed — PDF saved without cover page');
       }
     } else {
-      pdf.save(filename);
-      showToast('✅ PDF downloaded!');
+      finalBlob = pdf.output('blob');
+    }
+
+    // Download
+    const dlUrl = URL.createObjectURL(finalBlob);
+    const dlA = document.createElement('a');
+    dlA.href = dlUrl; dlA.download = filename; dlA.click();
+    setTimeout(() => URL.revokeObjectURL(dlUrl), 5000);
+    showToast('✅ PDF downloaded!');
+
+    // Notify hub so document appears as completed PDF
+    if(_hubDocId && window.parent !== window) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        window.parent.postMessage({type:'SAVE_PDF',docId:_hubDocId,pdfDataUri:reader.result,formPayload:jobWithoutPhotos(activeJob),fileName:filename},'*');
+      };
+      reader.readAsDataURL(finalBlob);
     }
 
   }catch(err){
@@ -1892,16 +1906,29 @@ showLibrary();
 <script>
 (function(){
   function applyContext(ctx) {
-    function setVal(id, val) {
-      var el = document.getElementById(id);
-      if (!el || val == null || val === '') return;
-      if (el.value) return;
-      el.value = val;
-      el.dispatchEvent(new Event('input',  { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
+    if (ctx.docId) _hubDocId = ctx.docId;
+
     var apply = function() {
-      /* Scoping app uses 8-digit numeric only; strip non-digits from WO */
+      // If hub sent a saved payload, restore the job and open editor directly
+      if (ctx.payload && ctx.payload.id) {
+        activeJob = JSON.parse(JSON.stringify(ctx.payload));
+        var idx = jobs.findIndex(function(j){ return j.id === activeJob.id; });
+        if (idx >= 0) jobs[idx] = activeJob; else jobs.push(activeJob);
+        saveStorage();
+        if (!photoStore[activeJob.id]) photoStore[activeJob.id] = {};
+        loadFormFromJob(activeJob);
+        showForm();
+        return;
+      }
+      // No payload — fresh job, prefill WO/job name from hub context
+      function setVal(id, val) {
+        var el = document.getElementById(id);
+        if (!el || val == null || val === '') return;
+        if (el.value) return;
+        el.value = val;
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
       var wo = (ctx.wo || '').replace(/\D/g, '').slice(0, 8);
       setVal('f-number500', wo);
       setVal('f-jobName',   ctx.name);
