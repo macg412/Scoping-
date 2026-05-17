@@ -1936,8 +1936,13 @@ showLibrary();
     if (document.getElementById('f-number500')) apply();
     else document.addEventListener('DOMContentLoaded', apply);
   }
+  var _ctxApplied = false;
   window.addEventListener('message', function(e){
-    if (e.data && e.data.type === 'JOB_CONTEXT') applyContext(e.data);
+    if (e.data && e.data.type === 'JOB_CONTEXT') {
+      if (_ctxApplied) return;
+      _ctxApplied = true;
+      applyContext(e.data);
+    }
   });
   if (window.parent !== window) window.parent.postMessage({ type:'EMBED_READY', app:'scoping' }, '*');
 })();
