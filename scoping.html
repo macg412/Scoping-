@@ -207,6 +207,10 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
       <input class="field-input" id="f-jobName" type="text" placeholder="Enter job name">
       <div class="error-msg" id="err-jobName"></div>
     </div>
+    <div class="field-wrap">
+      <div class="field-label">Date <span class="req">★</span></div>
+      <input class="field-input" id="f-date" type="date">
+    </div>
     <div class="field-wrap" style="margin-top:8px">
       <div class="field-label">Cover Page PDF <span style="color:#6b7280;font-size:11px;font-weight:400">(optional — added as first page)</span></div>
       <div id="cover-pdf-box" style="background:#131620;border:2px dashed #2a3045;border-radius:10px;padding:16px;display:flex;flex-direction:column;align-items:center;gap:10px;transition:border-color .15s">
@@ -331,7 +335,7 @@ function updateCoverPdfUI() {
 //  DEFAULT STRUCTURES
 // ════════════════════════════════════════════════════════
 function defaultJob() {
-  return { id:uid(), number500:'', jobName:'', sites:[], savedAt:null };
+  return { id:uid(), number500:'', jobName:'', date:new Date().toISOString().slice(0,10), sites:[], savedAt:null };
 }
 
 function defaultSite() {
@@ -432,6 +436,7 @@ function collectFormData() {
   if(!activeJob) return;
   activeJob.number500=document.getElementById('f-number500').value.trim();
   activeJob.jobName=document.getElementById('f-jobName').value.trim();
+  activeJob.date=document.getElementById('f-date').value;
   // Sites are collected live in activeJob.sites via addSite/removeSite
   // But we also need to grab current DOM values for fields
   activeJob.sites.forEach(site=>collectSiteFromDOM(site));
@@ -537,6 +542,7 @@ function saveDraft() {
 function loadFormFromJob(job) {
   document.getElementById('f-number500').value=job.number500||'';
   document.getElementById('f-jobName').value=job.jobName||'';
+  document.getElementById('f-date').value=job.date||'';
   updateCoverPdfUI();
   const container=document.getElementById('sites-container');
   container.innerHTML='';
@@ -1379,7 +1385,8 @@ async function generatePDF(){
       // Job number + name — centred
       pdf.setFont('helvetica','bold');pdf.setFontSize(15);pdf.setTextColor(0,0,0);
       pdf.text(`${activeJob.number500}  —  ${activeJob.jobName}`, PW/2, headerH, {align:'center'});
-      // Asset ID — right aligned
+      // Date — left aligned; Asset ID — right aligned
+      if(activeJob.date){pdf.setFontSize(10);pdf.text(new Date(activeJob.date+'T12:00:00').toLocaleDateString('en-NZ',{day:'2-digit',month:'short',year:'numeric'}),margin,headerH);}
       pdf.setFontSize(12);pdf.text(assetId||'', PW-margin, headerH, {align:'right'});
 
       // Quad borders
