@@ -18,24 +18,10 @@ body{background:#0f1117;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:
 /* ── Header ── */
 .app-header{background:linear-gradient(135deg,#16a34a 0%,#4ade80 100%);padding:0 16px;height:56px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;position:sticky;top:0;z-index:100;box-shadow:0 2px 20px rgba(74,222,128,.3)}
 .app-title{font-family:'Rajdhani',sans-serif;font-size:22px;font-weight:700;color:#000;letter-spacing:1px;text-align:center;justify-self:center}
-.back-btn{background:rgba(0,0,0,.25);border:none;color:#000;padding:6px 14px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-weight:600;font-size:14px;cursor:pointer;display:none;align-items:center;gap:6px;justify-self:start}
-.back-btn:hover{background:rgba(0,0,0,.4)}
-.back-btn.visible{display:flex}
+
 .header-right{justify-self:end;display:flex;align-items:center}
 
-/* ── Library ── */
-#view-library{padding:20px;max-width:700px;margin:0 auto}
-.new-job-btn{width:100%;padding:16px;background:linear-gradient(135deg,#16a34a,#4ade80);border:none;border-radius:12px;color:#000;font-family:'Rajdhani',sans-serif;font-size:18px;font-weight:700;letter-spacing:1px;cursor:pointer;margin-bottom:24px;box-shadow:0 4px 20px rgba(74,222,128,.25);transition:transform .15s,box-shadow .15s}
-.new-job-btn:hover{transform:translateY(-1px);box-shadow:0 6px 28px rgba(74,222,128,.4)}
-.section-label{font-family:'Rajdhani',sans-serif;font-size:13px;font-weight:600;color:#6b7280;letter-spacing:2px;text-transform:uppercase;margin-bottom:12px}
-.draft-card{background:#1e2333;border:1px solid #2a3045;border-radius:10px;padding:16px;margin-bottom:10px;cursor:pointer;transition:border-color .15s,background .15s;display:flex;align-items:center;justify-content:space-between}
-.draft-card:hover{border-color:#4ade80;background:#222840}
-.draft-name{font-family:'Rajdhani',sans-serif;font-size:17px;font-weight:600;color:#e2e8f0}
-.draft-meta{font-size:12px;color:#6b7280;margin-top:3px}
-.draft-badge{background:#166534;color:#4ade80;font-size:11px;font-weight:600;padding:3px 8px;border-radius:4px;letter-spacing:1px}
-.lib-delete-btn{background:none;border:none;color:#ef4444;cursor:pointer;padding:6px;border-radius:6px;font-size:16px;margin-left:12px;opacity:.6;transition:opacity .15s}
-.lib-delete-btn:hover{opacity:1}
-.empty-lib{text-align:center;color:#6b7280;padding:40px 20px;font-size:14px;line-height:2}
+
 
 /* ── Form View ── */
 #view-form{padding:20px;max-width:760px;margin:0 auto;padding-bottom:100px;display:none}
@@ -163,7 +149,6 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 <body>
 
 <div class="app-header">
-  <button class="back-btn" id="back-btn" onclick="showLibrary()">← Library</button>
   <span class="app-title">⚡ Scoping App V 1.8</span>
   <div class="header-right"></div>
 </div>
@@ -179,16 +164,6 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
       <button class="confirm-delete" id="confirm-delete-btn">DELETE</button>
       <button class="confirm-cancel" onclick="closeConfirm()">CANCEL</button>
     </div>
-  </div>
-</div>
-
-<!-- LIBRARY -->
-<div id="view-library">
-  <div style="padding:20px;max-width:700px;margin:0 auto">
-    <button class="new-job-btn" onclick="newJob()">＋ Scope New Job</button>
-    <div class="section-label" id="draft-count-label" style="display:none"></div>
-    <div id="draft-list"></div>
-    <div class="empty-lib" id="empty-msg">No scoping drafts yet.<br>Tap "Scope New Job" to begin.</div>
   </div>
 </div>
 
@@ -257,10 +232,9 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 // ════════════════════════════════════════════════════════
 //  STATE
 // ════════════════════════════════════════════════════════
-let jobs = [];
 let activeJob = null;
-let photoStore = {};     // { jobId: { siteId_photoKey: base64 } }
-let coverPdfStore = {};  // { jobId: { data: base64, name: string, size: number } }
+let photoStore = {};     // session-only: { jobId: { siteId_photoKey: base64 } }
+let coverPdfStore = {};  // session-only: { jobId: { data: base64, name: string } }
 let confirmCallback = null;
 let _hubDocId = null;    // docId from hub — used for DRAFT_SAVE / SAVE_PDF
 
@@ -275,17 +249,13 @@ function jobWithoutPhotos(job) {
   return stripped;
 }
 
-try { jobs = JSON.parse(localStorage.getItem('scopingJobs2')||'[]'); } catch(e){}
 try { photoStore = JSON.parse(localStorage.getItem('scopingPhotos2')||'{}'); } catch(e){}
-// coverPdfStore is session-only — PDFs are large and would blow localStorage
 
 function saveStorage() {
   try {
-    localStorage.setItem('scopingJobs2', JSON.stringify(jobs));
     localStorage.setItem('scopingPhotos2', JSON.stringify(photoStore));
   } catch(e) {
-    try { localStorage.setItem('scopingJobs2', JSON.stringify(jobs)); } catch(e2){}
-    showToast('⚠ Storage full — photos may not persist. Other data saved.');
+    showToast('⚠ Storage full — photos may not persist.');
   }
 }
 
@@ -378,40 +348,8 @@ function defaultXarmLevel() {
 // ════════════════════════════════════════════════════════
 //  VIEWS
 // ════════════════════════════════════════════════════════
-function showLibrary() {
-  document.getElementById('view-library').style.display='block';
-  document.getElementById('view-form').style.display='none';
-  document.getElementById('save-bar').classList.remove('visible');
-  document.getElementById('back-btn').classList.remove('visible');
-  activeJob=null;
-  renderLibrary();
-}
-
 function showForm() {
-  document.getElementById('view-library').style.display='none';
-  document.getElementById('view-form').style.display='block';
-  document.getElementById('save-bar').classList.add('visible');
-  document.getElementById('back-btn').classList.add('visible');
   window.scrollTo(0,0);
-}
-
-function renderLibrary() {
-  const list=document.getElementById('draft-list');
-  const empty=document.getElementById('empty-msg');
-  const label=document.getElementById('draft-count-label');
-  list.innerHTML='';
-  if(jobs.length===0){empty.style.display='block';label.style.display='none';return;}
-  empty.style.display='none'; label.style.display='block';
-  label.textContent=`Saved Drafts — ${jobs.length}`;
-  jobs.slice().reverse().forEach(j=>{
-    const lbl=j.number500&&j.jobName?`#${j.number500} – ${j.jobName}`:j.number500?`#${j.number500}`:'Untitled Job';
-    const dt=j.savedAt?new Date(j.savedAt).toLocaleString('en-AU',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'Not saved';
-    const card=document.createElement('div'); card.className='draft-card';
-    card.innerHTML=`<div style="flex:1;min-width:0"><div class="draft-name">${lbl}</div><div class="draft-meta">Last saved: ${dt} · ${j.sites.length} site${j.sites.length!==1?'s':''}</div></div><div style="display:flex;align-items:center;gap:8px;flex-shrink:0"><span class="draft-badge">DRAFT</span><button class="lib-delete-btn">🗑</button></div>`;
-    card.querySelector('.lib-delete-btn').onclick=e=>{e.stopPropagation();confirmDelete('Delete this entire job draft?',()=>{jobs=jobs.filter(x=>x.id!==j.id);delete photoStore[j.id];delete coverPdfStore[j.id];saveStorage();renderLibrary();});};
-    card.onclick=()=>openJob(j.id);
-    list.appendChild(card);
-  });
 }
 
 // ════════════════════════════════════════════════════════
@@ -424,13 +362,6 @@ function newJob() {
   showForm();
 }
 
-function openJob(id) {
-  activeJob=jobs.find(j=>j.id===id);
-  if(!activeJob) return;
-  if(!photoStore[activeJob.id]) photoStore[activeJob.id]={};
-  loadFormFromJob(activeJob);
-  showForm();
-}
 
 function collectFormData() {
   if(!activeJob) return;
@@ -527,9 +458,6 @@ function collectExtraFromDOM(site,ep) {
 function saveDraft() {
   collectFormData();
   activeJob.savedAt=new Date().toISOString();
-  const idx=jobs.findIndex(j=>j.id===activeJob.id);
-  if(idx>=0) jobs[idx]=activeJob; else jobs.push(activeJob);
-  saveStorage();
   if(_hubDocId && window.parent !== window) {
     window.parent.postMessage({type:'DRAFT_SAVE',docId:_hubDocId,payload:jobWithoutPhotos(activeJob)},'*');
   }
@@ -1626,8 +1554,11 @@ async function generatePDF(){
       const reader = new FileReader();
       reader.onloadend = () => {
         window.parent.postMessage({type:'SAVE_PDF',docId:_hubDocId,pdfDataUri:reader.result,formPayload:jobWithoutPhotos(activeJob),fileName:filename},'*');
+        window.parent.postMessage({type:'APP_DONE'},'*');
       };
       reader.readAsDataURL(finalBlob);
+    } else {
+      newJob();
     }
 
   }catch(err){
@@ -1907,7 +1838,7 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 // ════════════════════════════════════════════════════════
 //  INIT
 // ════════════════════════════════════════════════════════
-showLibrary();
+newJob();
 </script>
 <!-- FIELDHUB_BRIDGE_INSTALLED -->
 <script>
@@ -1919,9 +1850,6 @@ showLibrary();
       // If hub sent a saved payload, restore the job and open editor directly
       if (ctx.payload && ctx.payload.id) {
         activeJob = JSON.parse(JSON.stringify(ctx.payload));
-        var idx = jobs.findIndex(function(j){ return j.id === activeJob.id; });
-        if (idx >= 0) jobs[idx] = activeJob; else jobs.push(activeJob);
-        saveStorage();
         if (!photoStore[activeJob.id]) photoStore[activeJob.id] = {};
         loadFormFromJob(activeJob);
         showForm();
