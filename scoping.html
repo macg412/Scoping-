@@ -233,31 +233,31 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 //  STATE
 // ════════════════════════════════════════════════════════
 let activeJob = null;
-let photoStore = {};     // session-only: { jobId: { siteId_photoKey: base64 } }
 let coverPdfStore = {};  // session-only: { jobId: { data: base64, name: string } }
+const _pendingUploads = new Map();
+
+function setPhotoInOwner(prefix, key, data) {
+  for (const site of activeJob?.sites || []) {
+    if (site.id === prefix) { site[key] = data; return; }
+    for (const ep of site.extraPages || []) {
+      if (ep.id === prefix) { ep[key] = data; return; }
+    }
+  }
+}
+function getPhotoFromOwner(prefix, key) {
+  for (const site of activeJob?.sites || []) {
+    if (site.id === prefix) return site[key];
+    for (const ep of site.extraPages || []) {
+      if (ep.id === prefix) return ep[key];
+    }
+  }
+  return null;
+}
 let confirmCallback = null;
 let _hubDocId = null;    // docId from hub — used for DRAFT_SAVE / SAVE_PDF
 
-// Strip photo base64 from a job object before sending to hub (keeps payload small)
-function jobWithoutPhotos(job) {
-  const stripped = JSON.parse(JSON.stringify(job));
-  const photoKeys = ['p1','p2L','p2P1','p2P2','p3L','p3P1','p3P2'];
-  (stripped.sites||[]).forEach(s => {
-    photoKeys.forEach(k => delete s[k]);
-    (s.extraPages||[]).forEach(ep => photoKeys.forEach(k => delete ep[k]));
-  });
-  return stripped;
-}
 
-try { photoStore = JSON.parse(localStorage.getItem('scopingPhotos2')||'{}'); } catch(e){}
 
-function saveStorage() {
-  try {
-    localStorage.setItem('scopingPhotos2', JSON.stringify(photoStore));
-  } catch(e) {
-    showToast('⚠ Storage full — photos may not persist.');
-  }
-}
 
 function uid() { return '_'+Math.random().toString(36).slice(2,9); }
 
@@ -357,7 +357,7 @@ function showForm() {
 // ════════════════════════════════════════════════════════
 function newJob() {
   activeJob=defaultJob();
-  photoStore[activeJob.id]={};
+
   loadFormFromJob(activeJob);
   showForm();
 }
@@ -459,7 +459,7 @@ function saveDraft() {
   collectFormData();
   activeJob.savedAt=new Date().toISOString();
   if(_hubDocId && window.parent !== window) {
-    window.parent.postMessage({type:'DRAFT_SAVE',docId:_hubDocId,payload:jobWithoutPhotos(activeJob)},'*');
+    window.parent.postMessage({type:'DRAFT_SAVE',docId:_hubDocId,payload:activeJob},'*');
   }
   showToast('Draft saved ✓');
 }
@@ -493,9 +493,6 @@ function removeSite(siteId) {
     activeJob.sites=activeJob.sites.filter(s=>s.id!==siteId);
     const card=document.getElementById('sc-'+siteId);
     if(card) card.remove();
-    // Clean photo store
-    const ps=photoStore[activeJob.id]||{};
-    Object.keys(ps).forEach(k=>{if(k.startsWith(siteId)) delete ps[k];});
   });
 }
 
@@ -514,8 +511,6 @@ function removeExtraPage(siteId, epId) {
     if(site) site.extraPages=site.extraPages.filter(ep=>ep.id!==epId);
     const card=document.getElementById('ep-'+epId);
     if(card) card.remove();
-    const ps=photoStore[activeJob.id]||{};
-    Object.keys(ps).forEach(k=>{if(k.startsWith(epId)) delete ps[k];});
   });
 }
 
@@ -979,10 +974,8 @@ function renderSiteCard(site, job) {
   container.appendChild(card);
 
   // Restore photos for this site
-  const ps=photoStore[activeJob.id]||{};
   ['p1','p2L','p2P1','p2P2','p3L','p3P1','p3P2'].forEach(key=>{
-    const storeKey=sid+'_'+key;
-    if(ps[storeKey]) renderPhotoBox(sid,key,ps[storeKey]);
+    if(site[key]) renderPhotoBox(sid,key,site[key]);
   });
 
   // Render XARM forms
@@ -1073,10 +1066,8 @@ function renderExtraCard(site, ep, container) {
   container.appendChild(div);
 
   // Restore photos
-  const ps=photoStore[activeJob.id]||{};
   ['p1','p2L','p2P1','p2P2','p3L','p3P1','p3P2'].forEach(key=>{
-    const storeKey=eid+'_'+key;
-    if(ps[storeKey]) renderPhotoBox(eid,key,ps[storeKey]);
+    if(ep[key]) renderPhotoBox(eid,key,ep[key]);
   });
 }
 
@@ -1110,9 +1101,18 @@ function loadPhoto(prefix, key, input) {
     const img=new Image();
     img.onload=()=>{
       const data={src,isLandscape:img.width>=img.height};
-      if(!photoStore[activeJob.id]) photoStore[activeJob.id]={};
-      photoStore[activeJob.id][prefix+'_'+key]=data;
+      setPhotoInOwner(prefix,key,data);
       renderPhotoBox(prefix,key,data);
+      // Upload via hub; replace data URL with persistent storage URL
+      if(_hubDocId && window.parent!==window){
+        const uploadKey='sc_'+Date.now()+'_'+Math.random().toString(36).slice(2,6);
+        _pendingUploads.set(uploadKey, url=>{
+          if(!url) return;
+          const cur=getPhotoFromOwner(prefix,key);
+          if(cur){cur.src=url;saveDraft();}
+        });
+        window.parent.postMessage({type:'PHOTO_UPLOAD',docId:_hubDocId,key:uploadKey,dataUrl:src},'*');
+      }
     };
     img.src=src;
   };
@@ -1127,8 +1127,7 @@ function renderPhotoBox(prefix, key, photoData) {
 }
 
 function removePhoto(prefix, key) {
-  const ps=photoStore[activeJob?.id];
-  if(ps) delete ps[prefix+'_'+key];
+  setPhotoInOwner(prefix,key,null);
   const box=document.getElementById(`pb-${prefix}_${key}`);
   if(!box) return;
   // Reset to empty state
@@ -1289,7 +1288,6 @@ async function generatePDF(){
   activeJob.savedAt=new Date().toISOString();
   const idx=jobs.findIndex(j=>j.id===activeJob.id);
   if(idx>=0)jobs[idx]=activeJob;else jobs.push(activeJob);
-  saveStorage();
 
   try{
     const {jsPDF}=window.jspdf;
@@ -1297,9 +1295,7 @@ async function generatePDF(){
     const pdf=new jsPDF({orientation:'landscape',unit:'mm',format:'a3'});
     const PW=420,PH=297,margin=10,headerH=14,gap=4;
 
-    const ps=photoStore[activeJob.id]||{};
-
-    function loadImgEl(src){return new Promise(res=>{if(!src){res(null);return;}const img=new Image();img.onload=()=>res(img);img.onerror=()=>res(null);img.src=src;});}
+    function loadImgEl(src){return new Promise(res=>{if(!src){res(null);return;}const img=new Image();if(src.startsWith('https://'))img.crossOrigin='anonymous';img.onload=()=>res(img);img.onerror=()=>res(null);img.src=src;});}
 
     async function drawPage(assetId, p1src, p2mode, p2Lsrc, p2P1src, p2P2src, p3mode, p3Lsrc, p3P1src, p3P2src, infoLines, infoTitle){
       const gridTop=headerH+3+gap;
@@ -1493,22 +1489,21 @@ async function generatePDF(){
 
       await drawPage(
         site.assetId,
-        ps[sid+'_p1']?.src||null,
-        site.photo2Mode, ps[sid+'_p2L']?.src||null, ps[sid+'_p2P1']?.src||null, ps[sid+'_p2P2']?.src||null,
-        site.photo3Mode, ps[sid+'_p3L']?.src||null, ps[sid+'_p3P1']?.src||null, ps[sid+'_p3P2']?.src||null,
+        site.p1?.src||null,
+        site.photo2Mode, site.p2L?.src||null, site.p2P1?.src||null, site.p2P2?.src||null,
+        site.photo3Mode, site.p3L?.src||null, site.p3P1?.src||null, site.p3P2?.src||null,
         infoLines, 'Site Information'
       );
 
       // Extra pages
       for(const ep of (site.extraPages||[])){
         pdf.addPage();
-        const eid=ep.id;
         const epInfoLines=ep.notes?ep.notes.split('\n').filter(l=>l.trim()):['No additional notes'];
         await drawPage(
           site.assetId+' — Additional Info',
-          ps[eid+'_p1']?.src||null,
-          ep.photo2Mode, ps[eid+'_p2L']?.src||null, ps[eid+'_p2P1']?.src||null, ps[eid+'_p2P2']?.src||null,
-          ep.photo3Mode, ps[eid+'_p3L']?.src||null, ps[eid+'_p3P1']?.src||null, ps[eid+'_p3P2']?.src||null,
+          ep.p1?.src||null,
+          ep.photo2Mode, ep.p2L?.src||null, ep.p2P1?.src||null, ep.p2P2?.src||null,
+          ep.photo3Mode, ep.p3L?.src||null, ep.p3P1?.src||null, ep.p3P2?.src||null,
           epInfoLines, 'Notes'
         );
       }
@@ -1553,7 +1548,7 @@ async function generatePDF(){
     if(_hubDocId && window.parent !== window) {
       const reader = new FileReader();
       reader.onloadend = () => {
-        window.parent.postMessage({type:'SAVE_PDF',docId:_hubDocId,pdfDataUri:reader.result,formPayload:jobWithoutPhotos(activeJob),fileName:filename},'*');
+        window.parent.postMessage({type:'SAVE_PDF',docId:_hubDocId,pdfDataUri:reader.result,formPayload:activeJob,fileName:filename},'*');
         window.parent.postMessage({type:'APP_DONE'},'*');
       };
       reader.readAsDataURL(finalBlob);
@@ -1850,7 +1845,6 @@ newJob();
       // If hub sent a saved payload, restore the job and open editor directly
       if (ctx.payload && ctx.payload.id) {
         activeJob = JSON.parse(JSON.stringify(ctx.payload));
-        if (!photoStore[activeJob.id]) photoStore[activeJob.id] = {};
         loadFormFromJob(activeJob);
         showForm();
         return;
@@ -1873,6 +1867,9 @@ newJob();
   }
   var _ctxApplied = false;
   window.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'PHOTO_UPLOADED') {
+      var cb=_pendingUploads.get(e.data.key); if(cb){_pendingUploads.delete(e.data.key);cb(e.data.url);} return;
+    }
     if (e.data && e.data.type === 'JOB_CONTEXT') {
       if (_ctxApplied) return;
       _ctxApplied = true;
