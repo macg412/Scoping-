@@ -353,6 +353,7 @@ function defaultSite() {
     jobMen:'', jobHours:'', jobHiab:false, jobEwp:false,
     assetTypes:[], assetOtherText:'',
     xarmLevels:1, xarmData:[defaultXarmLevel()],
+    poleData:{length:'',poles:'',mfr:'',material:'',code:''},
     ohsData:{equip:'',voltage:'',length:'',poles:'',circuit:'',levels:'',material:'',code:''},
     ohswData:{voltage:'',mount:'',type:'',mfr:'',code:''},
     ohtxData:{voltage:'',kva:'',phases:'',mfr:'',code:''},
@@ -465,6 +466,11 @@ function collectSiteFromDOM(site) {
   site.assetOtherText=get('assetOther');
   site.xarmLevels=parseInt(get('xarmCount'))||1;
   site.xarmData=collectXarmDataForSite(sid, site.xarmLevels);
+  // Pole
+  if(!site.poleData) site.poleData={};
+  site.poleData.length=get('pole-length'); site.poleData.poles=get('pole-poles');
+  site.poleData.mfr=get('pole-mfr'); site.poleData.material=get('pole-material');
+  site.poleData.code=buildPoleCode(site.poleData);
   // OH Structure
   if(!site.ohsData) site.ohsData={};
   site.ohsData.equip=get('ohs-equip'); site.ohsData.voltage=get('ohs-voltage');
@@ -783,7 +789,7 @@ function renderSiteCard(site, job) {
     <div style="border-top:1px solid #2a3045;padding-top:16px;margin-top:4px">
       <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#4ade80;letter-spacing:1px;text-transform:uppercase;margin-bottom:14px">Asset Type</div>
       <div class="check-grid">
-        ${['XARM/s','OH Structure','OHTX','OH Switch','GMTX','LV Distro/Service Box','LV service','RMU','Other'].map(a=>`
+        ${['Pole','XARM/s','OH Structure','OHTX','OH Switch','GMTX','LV Distro/Service Box','LV service','RMU','Other'].map(a=>`
           <div class="check-item${(site.assetTypes||[]).includes(a)?' checked':''}" data-site="${sid}" data-asset="${a}" onclick="toggleAsset(this,'${sid}')">${a}</div>`).join('')}
       </div>
       <div id="${sid}-assetOther-wrap" style="display:${(site.assetTypes||[]).includes('Other')?'':'none'};margin-top:14px">
@@ -798,6 +804,40 @@ function renderSiteCard(site, job) {
           <input class="field-input" id="${sid}-xarmCount" type="number" min="1" max="7" value="${site.xarmLevels||1}" oninput="updateXarmFormsForSite('${sid}')">
         </div>
         <div id="${sid}-xarm-forms"></div>
+      </div>
+
+      <!-- POLE sub-form -->
+      <div id="${sid}-pole-section" style="display:${(site.assetTypes||[]).includes('Pole')?'':'none'};margin-top:16px;background:#181c27;border:1px solid #2a3045;border-radius:10px;padding:16px">
+        <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#4ade80;letter-spacing:1px;text-transform:uppercase;margin-bottom:14px">Pole Details</div>
+        <div class="two-col">
+          <div class="field-wrap"><div class="field-label">Pole Length</div>
+            <select class="field-input" id="${sid}-pole-length" onchange="updatePoleCode('${sid}')">
+              <option value="">— Select —</option>
+              ${[['7.50m','75'],['9.00m','90'],['9.50m','95'],['10.00m','100'],['10.50m','105'],['11.00m','110'],['11.50m','115'],['12.00m','120'],['12.40m','124'],['12.50m','125'],['13.60m','136'],['14.80m','148'],['15.50m','155'],['18.50m','185']].map(([l,v])=>`<option value="${v}"${(site.poleData?.length||'')===v?' selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field-wrap"><div class="field-label">Number of Poles</div>
+            <select class="field-input" id="${sid}-pole-poles" onchange="updatePoleCode('${sid}')">
+              <option value="">— Select —</option>
+              ${[['Single','S'],['Double','D'],['H-Structure','H']].map(([l,v])=>`<option value="${v}"${(site.poleData?.poles||'')===v?' selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="two-col">
+          <div class="field-wrap"><div class="field-label">Manufacturer</div>
+            <select class="field-input" id="${sid}-pole-mfr" onchange="updatePoleCode('${sid}')">
+              <option value="">— Select —</option>
+              ${[['Busck','B'],['Dulhunty','D'],['Hume','H'],['Industrial Galvanisers Corporation PTY Ltd','G'],['International Utility Poles','I'],['Goldpine Electropoles','GP'],['Hard wood Poles','HW']].map(([l,v])=>`<option value="${v}"${(site.poleData?.mfr||'')===v?' selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field-wrap"><div class="field-label">Material</div>
+            <select class="field-input" id="${sid}-pole-material" onchange="updatePoleCode('${sid}')">
+              <option value="">— Select —</option>
+              ${[['Reinforced Concrete','C'],['Glass Fibre Reinforced Concrete','F'],['Galvanised Steel','G'],['Hardwood','H'],['Prestressed Concrete','P'],['Prestressed Heavy Concrete','PH'],['Softwood (Rating 12kN)','S'],['Softwood (Rating 9kN)','SL']].map(([l,v])=>`<option value="${v}"${(site.poleData?.material||'')===v?' selected':''}>${l}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="xarm-code-preview" id="${sid}-pole-code" style="display:${site.poleData?.code?'':'none'}">${site.poleData?.code?'🔖 '+site.poleData.code:''}</div>
       </div>
 
       <!-- OH STRUCTURE sub-form -->
@@ -1297,6 +1337,7 @@ function toggleAsset(el, sid) {
   el.classList.toggle('checked');
   const checked=Array.from(document.querySelectorAll(`.check-item[data-site="${sid}"].checked`)).map(e=>e.dataset.asset);
   document.getElementById(`${sid}-assetOther-wrap`).style.display=checked.includes('Other')?'':'none';
+  document.getElementById(`${sid}-pole-section`).style.display=checked.includes('Pole')?'':'none';
   document.getElementById(`${sid}-xarm-section`).style.display=checked.includes('XARM/s')?'':'none';
   document.getElementById(`${sid}-ohstruct-section`).style.display=checked.includes('OH Structure')?'':'none';
   document.getElementById(`${sid}-ohswitch-section`).style.display=checked.includes('OH Switch')?'':'none';
@@ -1700,6 +1741,10 @@ async function generatePDF(){
 // ════════════════════════════════════════════════════════
 //  ASSET CODE GENERATORS
 // ════════════════════════════════════════════════════════
+function buildPoleCode(d){
+  if(!d||!d.length||!d.poles||!d.mfr||!d.material) return '';
+  return `POLE-${d.length}-${d.poles}-${d.mfr}-${d.material}`;
+}
 function buildOHSCode(d){
   if(!d||!d.equip||!d.voltage||!d.length||!d.poles||!d.circuit||!d.levels||!d.material) return '';
   return `STOH-${d.equip}-${d.voltage}-${d.length}-${d.poles}-${d.circuit}-${d.levels}-${d.material}`;
@@ -1713,6 +1758,13 @@ function buildOHTXCode(d){
   return `OHDISTTX-${d.voltage}-${d.kva}-${d.phases}-${d.mfr}`;
 }
 
+function updatePoleCode(sid){
+  const get=id=>document.getElementById(`${sid}-${id}`)?.value||'';
+  const d={length:get('pole-length'),poles:get('pole-poles'),mfr:get('pole-mfr'),material:get('pole-material')};
+  const code=buildPoleCode(d);
+  const el=document.getElementById(`${sid}-pole-code`);
+  if(el){el.style.display=code?'':'none';el.textContent=code?'🔖 '+code:'';}
+}
 function updateOHSCode(sid){
   const get=id=>document.getElementById(`${sid}-${id}`)?.value||'';
   const d={equip:get('ohs-equip'),voltage:get('ohs-voltage'),length:get('ohs-length'),poles:get('ohs-poles'),circuit:get('ohs-circuit'),levels:get('ohs-levels'),material:get('ohs-material')};
@@ -1904,6 +1956,7 @@ function buildInfoLines(site){
   if((site.assetTypes||[]).includes('XARM/s')){
     (site.xarmData||[]).slice(0,site.xarmLevels).forEach((lv,i)=>lines.push(`XARM L${i+1}: ${getXarmCode(lv)}`));
   }
+  if((site.assetTypes||[]).includes('Pole')&&site.poleData?.code) lines.push('Pole: '+site.poleData.code);
   if((site.assetTypes||[]).includes('OH Structure')&&site.ohsData?.code) lines.push('OH Struct: '+site.ohsData.code);
   if((site.assetTypes||[]).includes('OH Switch')&&site.ohswData?.code) lines.push('OH Switch: '+site.ohswData.code);
   if((site.assetTypes||[]).includes('OHTX')&&site.ohtxData?.code) lines.push('OH TX: '+site.ohtxData.code);
