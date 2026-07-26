@@ -125,8 +125,10 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 .add-site-btn:hover{background:#166534;border-style:solid}
 
 /* ── Save Bar ── */
-.save-bar{position:fixed;bottom:0;left:0;right:0;background:#181c27;border-top:1px solid #2a3045;padding:12px 20px;display:none;gap:10px;z-index:50}
+.save-bar{position:fixed;bottom:0;left:0;right:0;background:#181c27;border-top:1px solid #2a3045;padding:12px 20px;display:none;gap:10px;z-index:50;align-items:center;flex-wrap:wrap}
 .save-bar.visible{display:flex}
+.save-status{font-family:'Rajdhani',sans-serif;font-size:13px;font-weight:600;color:#6b7280;letter-spacing:.3px;flex:0 0 100%;order:-1;text-align:center;margin-bottom:2px}
+@media (min-width:520px){.save-status{flex:1 1 auto;order:0;text-align:left;margin-bottom:0}}
 .btn{flex:1;padding:13px;border:none;border-radius:9px;font-family:'Rajdhani',sans-serif;font-size:16px;font-weight:700;letter-spacing:1px;cursor:pointer;transition:transform .12s,opacity .12s}
 .btn:active{transform:scale(.97)}
 .btn-save{background:#2a3045;color:#e2e8f0}
@@ -243,7 +245,8 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 
 <!-- Save Bar -->
 <div class="save-bar" id="save-bar">
-  <button class="btn btn-save" onclick="saveDraft()">💾 Save Draft</button>
+  <span id="save-status" class="save-status"></span>
+  <button class="btn btn-save" onclick="saveDraft();showToast('Draft saved ✓')">💾 Save Draft</button>
   <button class="btn btn-generate" id="btn-generate" onclick="generatePDF()">📄 Generate PDF</button>
 </div>
 
@@ -258,6 +261,7 @@ let activeJob = null;
 let photoStore = {};     // { jobId: { siteId_photoKey: base64 } }
 let coverPdfStore = {};  // { jobId: { data: base64, name: string, size: number } }
 let confirmCallback = null;
+let autoSaveTimer = null;
 let _hubDocId = null;    // docId from hub — used for DRAFT_SAVE / SAVE_PDF
 let _exportMode = false;
 
@@ -521,6 +525,9 @@ function collectExtraFromDOM(site,ep) {
 }
 
 function saveDraft() {
+  if(!activeJob) return;
+  clearTimeout(autoSaveTimer);
+  setSaveStatus('saving');
   collectFormData();
   activeJob.savedAt=new Date().toISOString();
   const idx=jobs.findIndex(j=>j.id===activeJob.id);
@@ -529,8 +536,32 @@ function saveDraft() {
   if(_hubDocId && window.parent !== window) {
     window.parent.postMessage({type:'DRAFT_SAVE',docId:_hubDocId,payload:jobWithoutPhotos(activeJob)},'*');
   }
-  showToast('Draft saved ✓');
+  setSaveStatus('saved');
 }
+
+// Debounced autosave — fires 1.5s after the last change so edits (including
+// photos) survive if the user closes the tab or the hub iframe unloads.
+function scheduleSave() {
+  if(!activeJob) return;
+  setSaveStatus('pending');
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer=setTimeout(saveDraft, 1500);
+}
+
+function setSaveStatus(state) {
+  const el=document.getElementById('save-status');
+  if(!el) return;
+  if(state==='saving') el.textContent='Saving…';
+  else if(state==='pending') el.textContent='Unsaved changes…';
+  else el.textContent='Saved '+new Date().toLocaleTimeString('en-NZ',{hour:'2-digit',minute:'2-digit'});
+}
+
+// Flush any pending autosave immediately if the user backgrounds/closes the tab
+// before the debounce timer fires.
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState==='hidden' && activeJob) saveDraft();
+});
+window.addEventListener('pagehide', () => { if(activeJob) saveDraft(); });
 
 // ════════════════════════════════════════════════════════
 //  FORM LOAD
@@ -553,6 +584,7 @@ function addSite() {
   renderSiteCard(site,activeJob);
   // Scroll to it
   setTimeout(()=>document.getElementById('sc-'+site.id)?.scrollIntoView({behavior:'smooth',block:'start'}),100);
+  scheduleSave();
 }
 
 function removeSite(siteId) {
@@ -563,6 +595,7 @@ function removeSite(siteId) {
     // Clean photo store
     const ps=photoStore[activeJob.id]||{};
     Object.keys(ps).forEach(k=>{if(k.startsWith(siteId)) delete ps[k];});
+    scheduleSave();
   });
 }
 
@@ -573,6 +606,7 @@ function addExtraPage(siteId) {
   site.extraPages.push(ep);
   renderExtraCard(site,ep,document.getElementById('extras-'+siteId));
   setTimeout(()=>document.getElementById('ep-'+ep.id)?.scrollIntoView({behavior:'smooth',block:'start'}),100);
+  scheduleSave();
 }
 
 function removeExtraPage(siteId, epId) {
@@ -583,6 +617,7 @@ function removeExtraPage(siteId, epId) {
     if(card) card.remove();
     const ps=photoStore[activeJob.id]||{};
     Object.keys(ps).forEach(k=>{if(k.startsWith(epId)) delete ps[k];});
+    scheduleSave();
   });
 }
 
@@ -1169,19 +1204,34 @@ function photoBoxHTML(prefix, key, label, portrait) {
 // ════════════════════════════════════════════════════════
 //  PHOTO HANDLING
 // ════════════════════════════════════════════════════════
+// Photos are downscaled before storage — raw camera photos (often several MB
+// each) would blow past localStorage's quota within a site or two and get
+// silently dropped. 1800px longest side at 0.85 JPEG quality is still well
+// beyond what the PDF's photo quads need, but keeps drafts reliably saveable.
+const PHOTO_MAX_DIM=1800, PHOTO_QUALITY=0.85;
+
 function loadPhoto(prefix, key, input) {
   const file=input.files[0]; if(!file) return;
   const reader=new FileReader();
   reader.onload=e=>{
-    const src=e.target.result;
     const img=new Image();
     img.onload=()=>{
-      const data={src,isLandscape:img.width>=img.height};
+      const isLandscape=img.width>=img.height;
+      let w=img.width, h=img.height;
+      if(w>PHOTO_MAX_DIM||h>PHOTO_MAX_DIM){
+        const scale=PHOTO_MAX_DIM/Math.max(w,h);
+        w=Math.round(w*scale); h=Math.round(h*scale);
+      }
+      const canvas=document.createElement('canvas');
+      canvas.width=w; canvas.height=h;
+      canvas.getContext('2d').drawImage(img,0,0,w,h);
+      const data={src:canvas.toDataURL('image/jpeg',PHOTO_QUALITY),isLandscape};
       if(!photoStore[activeJob.id]) photoStore[activeJob.id]={};
       photoStore[activeJob.id][prefix+'_'+key]=data;
       renderPhotoBox(prefix,key,data);
+      scheduleSave();
     };
-    img.src=src;
+    img.src=e.target.result;
   };
   reader.readAsDataURL(file);
   input.value='';
@@ -1210,6 +1260,7 @@ function removePhoto(prefix, key) {
         <button class="photo-action-btn" onclick="document.getElementById('fi-${prefix}_${key}-gallery').click()">${portrait?'🖼':'🖼 Gallery'}</button>
       </div>
     </div>`;
+  scheduleSave();
 }
 
 function setPhotoMode(prefix, group, mode) {
@@ -1218,6 +1269,7 @@ function setPhotoMode(prefix, group, mode) {
   document.getElementById(`seg-${prefix}-${group}-P`)?.classList.toggle('active',!isL);
   document.getElementById(`pm-${prefix}-${group}-landscape`).style.display=isL?'':'none';
   document.getElementById(`pm-${prefix}-${group}-portrait`).style.display=isL?'none':'';
+  scheduleSave();
 }
 
 // ════════════════════════════════════════════════════════
@@ -1252,6 +1304,7 @@ function toggleAsset(el, sid) {
   document.getElementById(`${sid}-gmtx-section`).style.display=checked.includes('GMTX')?'':'none';
   document.getElementById(`${sid}-lvdistro-section`).style.display=checked.includes('LV Distro/Service Box')?'':'none';
   document.getElementById(`${sid}-rmu-section`).style.display=checked.includes('RMU')?'':'none';
+  scheduleSave();
 }
 
 // ════════════════════════════════════════════════════════
@@ -1913,6 +1966,11 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 //  INIT
 // ════════════════════════════════════════════════════════
 showLibrary();
+
+// Delegated autosave — catches every current and future field inside the
+// form (site cards, extra pages, sub-forms) without wiring each one by hand.
+document.getElementById('view-form').addEventListener('input', scheduleSave);
+document.getElementById('view-form').addEventListener('change', scheduleSave);
 </script>
 <!-- FIELDHUB_BRIDGE_INSTALLED -->
 <script>
@@ -1932,7 +1990,11 @@ showLibrary();
         showForm();
         return;
       }
-      // No payload — fresh job, prefill WO/job name from hub context
+      // No payload — brand-new doc. Create and show the job form first,
+      // then prefill WO/job name from hub context (previously this branch
+      // never called newJob()/showForm(), so a fresh Scoping doc opened via
+      // the hub silently stayed on the library screen with no active job).
+      if (typeof newJob === 'function') newJob();
       function setVal(id, val) {
         var el = document.getElementById(id);
         if (!el || val == null || val === '') return;
