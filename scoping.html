@@ -346,6 +346,7 @@ function defaultSite() {
     p1:null, photo2Mode:'landscape', p2L:null, p2P1:null, p2P2:null,
     photo3Mode:'landscape', p3L:null, p3P1:null, p3P2:null,
     location:'', worksRequired:'',
+    landowner:{show:false, sameAsSiteId:'', name:'', address:'', phone:'', email:''},
     outage:'', outageOther:'',
     tmEnabled:false, tmType:'', tmOther:'',
     dialB4:false, thirdParty:false, thirdPartyText:'',
@@ -456,6 +457,13 @@ function collectSiteFromDOM(site) {
   const get=id=>document.getElementById(`${sid}-${id}`)?.value||'';
   const chk=id=>document.getElementById(`${sid}-${id}`)?.checked||false;
   site.worksRequired=get('worksRequired');
+  if(!site.landowner) site.landowner={show:false,sameAsSiteId:'',name:'',address:'',phone:'',email:''};
+  site.landowner.show=document.getElementById(`${sid}-landowner-section`)?.style.display!=='none';
+  site.landowner.sameAsSiteId=document.getElementById(`${sid}-landowner-sameas`)?.value||'';
+  site.landowner.name=get('landowner-name');
+  site.landowner.address=get('landowner-address');
+  site.landowner.phone=get('landowner-phone');
+  site.landowner.email=get('landowner-email');
   site.outage=get('outage'); site.outageOther=get('outageOther');
   site.tmEnabled=chk('tm'); site.tmType=get('tmType'); site.tmOther=get('tmOther');
   site.dialB4=chk('dialb4'); site.thirdParty=chk('thirdparty');
@@ -699,6 +707,40 @@ function renderSiteCard(site, job) {
     <!-- SITE INFORMATION -->
     <div style="border-top:1px solid #2a3045;padding-top:16px;margin-top:4px">
       <div style="font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;color:#4ade80;letter-spacing:1px;text-transform:uppercase;margin-bottom:14px">Site Information</div>
+
+      <div class="field-wrap" id="${sid}-landowner-toggle-wrap" style="display:${site.landowner?.show?'none':''}">
+        <button type="button" class="action-btn btn-add-extra" style="width:100%" onclick="openLandownerDetails('${sid}')">＋ Landowner Details</button>
+      </div>
+      <div id="${sid}-landowner-section" style="display:${site.landowner?.show?'':'none'};margin-bottom:16px;background:#181c27;border:1px solid #2a3045;border-radius:10px;padding:16px">
+        <div class="extra-card-header">
+          <div class="extra-card-title">Landowner Details</div>
+          <button class="btn-remove-extra" onclick="closeLandownerDetails('${sid}')" title="Hide landowner details">✕</button>
+        </div>
+        ${siteIdx>1?`
+        <div class="field-wrap">
+          <div class="field-label">Same as Site</div>
+          <select class="field-input" id="${sid}-landowner-sameas" onchange="applySameAsLandowner('${sid}')">
+            <option value="">— Enter manually —</option>
+            ${landownerSiteOptionsHTML(sid,job)}
+          </select>
+        </div>`:''}
+        <div class="field-wrap">
+          <div class="field-label">Name</div>
+          <input class="field-input" id="${sid}-landowner-name" type="text" placeholder="Landowner name" value="${esc(site.landowner?.name||'')}">
+        </div>
+        <div class="field-wrap">
+          <div class="field-label">Address</div>
+          <input class="field-input" id="${sid}-landowner-address" type="text" placeholder="Property address" value="${esc(site.landowner?.address||'')}">
+        </div>
+        <div class="field-wrap">
+          <div class="field-label">Phone Number</div>
+          <input class="field-input" id="${sid}-landowner-phone" type="tel" placeholder="Phone number" value="${esc(site.landowner?.phone||'')}">
+        </div>
+        <div class="field-wrap">
+          <div class="field-label">Email</div>
+          <input class="field-input" id="${sid}-landowner-email" type="email" placeholder="Email address" value="${esc(site.landowner?.email||'')}">
+        </div>
+      </div>
 
       <div class="field-wrap">
         <div class="field-label">Location</div>
@@ -1333,6 +1375,46 @@ function toggleSiteField(sid, field) {
   }
 }
 
+// ════════════════════════════════════════════════════════
+//  LANDOWNER DETAILS
+// ════════════════════════════════════════════════════════
+function landownerSiteOptionsHTML(sid, job) {
+  const current=job.sites.find(s=>s.id===sid);
+  return job.sites.filter(s=>s.id!==sid).map(s=>{
+    const idx=job.sites.indexOf(s)+1;
+    const selected=current?.landowner?.sameAsSiteId===s.id?' selected':'';
+    return `<option value="${s.id}"${selected}>Site ${idx}</option>`;
+  }).join('');
+}
+
+function openLandownerDetails(sid) {
+  const site=activeJob.sites.find(s=>s.id===sid);
+  if(!site) return;
+  if(!site.landowner) site.landowner={show:false,sameAsSiteId:'',name:'',address:'',phone:'',email:''};
+  site.landowner.show=true;
+  document.getElementById(`${sid}-landowner-toggle-wrap`).style.display='none';
+  document.getElementById(`${sid}-landowner-section`).style.display='';
+  scheduleSave();
+}
+
+function closeLandownerDetails(sid) {
+  const site=activeJob.sites.find(s=>s.id===sid);
+  if(!site) return;
+  if(site.landowner) site.landowner.show=false;
+  document.getElementById(`${sid}-landowner-section`).style.display='none';
+  document.getElementById(`${sid}-landowner-toggle-wrap`).style.display='';
+  scheduleSave();
+}
+
+function applySameAsLandowner(sid) {
+  const srcId=document.getElementById(`${sid}-landowner-sameas`)?.value;
+  if(!srcId) return;
+  const getSrc=field=>document.getElementById(`${srcId}-landowner-${field}`)?.value||'';
+  const setDst=(field,v)=>{const el=document.getElementById(`${sid}-landowner-${field}`);if(el)el.value=v;};
+  ['name','address','phone','email'].forEach(f=>setDst(f,getSrc(f)));
+  scheduleSave();
+}
+
 function toggleAsset(el, sid) {
   el.classList.toggle('checked');
   const checked=Array.from(document.querySelectorAll(`.check-item[data-site="${sid}"].checked`)).map(e=>e.dataset.asset);
@@ -1945,6 +2027,12 @@ function collectLvServices(sid) {
 function buildInfoLines(site){
   const lines=[];
   if(site.location) lines.push('Location: '+site.location);
+  if(site.landowner&&(site.landowner.name||site.landowner.address||site.landowner.phone||site.landowner.email)){
+    if(site.landowner.name) lines.push('Landowner: '+site.landowner.name);
+    if(site.landowner.address) lines.push('Landowner Address: '+site.landowner.address);
+    if(site.landowner.phone) lines.push('Landowner Phone: '+site.landowner.phone);
+    if(site.landowner.email) lines.push('Landowner Email: '+site.landowner.email);
+  }
   if(site.worksRequired) site.worksRequired.split('\n').forEach((l,i)=>{ if(l.trim()) lines.push((i===0?'Works: ':'')+l.trim()); });
   if(site.outage) lines.push('Outage: '+site.outage+(site.outage==='Other'?' – '+site.outageOther:''));
   lines.push(site.tmEnabled?'TM: '+site.tmType+(site.tmType==='Other'?' – '+site.tmOther:''):'No TM required');
