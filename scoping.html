@@ -8,6 +8,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0f1117;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh}
@@ -83,8 +84,24 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 .photo-overlay-bar{position:absolute;top:6px;right:6px;z-index:2}
 .photo-remove{background:rgba(180,0,0,0.85);border:2px solid rgba(255,255,255,0.6);color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.5);transition:background .15s,transform .1s}
 .photo-remove:hover{background:rgba(220,0,0,1);transform:scale(1.1)}
+.photo-pending{position:absolute;top:6px;left:6px;z-index:2;background:rgba(20,20,30,.8);border:1px solid rgba(255,255,255,.35);color:#fbbf24;font-size:12px;font-weight:700;border-radius:6px;padding:2px 7px;line-height:1.5}
 .portrait-pair{display:flex;gap:10px}
 .portrait-pair .photo-box{flex:1}
+
+/* ── Site photo picker ── */
+.sp-modal{display:none;position:fixed;inset:0;background:rgba(5,7,12,.82);z-index:200;align-items:center;justify-content:center;padding:16px}
+.sp-box{background:#161a26;border:1px solid #2a3045;border-radius:14px;width:100%;max-width:760px;max-height:86vh;display:flex;flex-direction:column;overflow:hidden}
+.sp-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 8px}
+.sp-title{font-family:'Rajdhani',sans-serif;font-size:18px;font-weight:700;color:#4ade80;letter-spacing:1px;text-transform:uppercase}
+.sp-close{background:#2a3045;border:none;color:#e2e8f0;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:15px}
+.sp-close:hover{background:#3a4260}
+.sp-sub{padding:0 16px 12px;font-size:12.5px;color:#94a3b8;line-height:1.45}
+.sp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px;padding:0 16px 18px;overflow-y:auto}
+.sp-thumb{background:#0f1117;border:1px solid #2a3045;border-radius:10px;overflow:hidden;cursor:pointer;transition:border-color .12s,transform .1s}
+.sp-thumb:hover{border-color:#4ade80;transform:translateY(-2px)}
+.sp-thumb img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block}
+.sp-cap{padding:6px 8px;font-size:11.5px;color:#cbd5e1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sp-empty{grid-column:1/-1;text-align:center;color:#94a3b8;font-size:13px;padding:28px 12px;line-height:1.5}
 
 /* ── Checkboxes ── */
 .check-grid{display:flex;flex-wrap:wrap;gap:8px}
@@ -246,8 +263,21 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 <!-- Save Bar -->
 <div class="save-bar" id="save-bar">
   <span id="save-status" class="save-status"></span>
-  <button class="btn btn-save" onclick="saveDraft();showToast('Draft saved ✓')">💾 Save Draft</button>
+  <span id="photo-sync" class="photo-sync" style="display:none"></span>
+  <button class="btn btn-save" onclick="saveDraft()">💾 Save Draft</button>
   <button class="btn btn-generate" id="btn-generate" onclick="generatePDF()">📄 Generate PDF</button>
+</div>
+
+<!-- Site photo picker -->
+<div id="site-picker" class="sp-modal">
+  <div class="sp-box">
+    <div class="sp-head">
+      <div class="sp-title">🗂 Site Photos</div>
+      <button class="sp-close" onclick="closeSitePicker()">✕</button>
+    </div>
+    <div class="sp-sub">Photos already on this site in the job folder — choosing one reuses it, no second copy.</div>
+    <div id="site-picker-grid" class="sp-grid"></div>
+  </div>
 </div>
 
 <div id="toast"></div>
@@ -258,14 +288,83 @@ textarea.field-input{resize:none;min-height:72px;line-height:1.5;overflow-y:auto
 // ════════════════════════════════════════════════════════
 let jobs = [];
 let activeJob = null;
-let photoStore = {};     // { jobId: { siteId_photoKey: base64 } }
 let coverPdfStore = {};  // { jobId: { data: base64, name: string, size: number } }
 let confirmCallback = null;
 let autoSaveTimer = null;
 let _hubDocId = null;    // docId from hub — used for DRAFT_SAVE / SAVE_PDF
 let _exportMode = false;
 
-// Strip photo base64 from a job object before sending to hub (keeps payload small)
+// ── Photo model ──────────────────────────────────────────
+// Photos used to live as base64 in localStorage, which capped the whole job at
+// the ~5 MB origin quota (3-4 sites) and meant photos never left the device
+// that took them. They are now the *same* photos as the job folder's site
+// gallery — one copy in the `site-photos` bucket, one row in `site_photos` —
+// so scoping and the gallery stay in sync and nothing is stored twice.
+//
+// A scoping photo slot holds only a reference:
+//   job.photos: { "<siteId>_<key>": { photoId, url, isLandscape } }
+//
+// IndexedDB caches the bytes for instant display, offline capture, and
+// retrying uploads that could not go out in the field.
+const PHOTO_DB='scopingPhotoCache', PHOTO_STORE='photos';
+let _photoDb=null;
+const photoObjectUrls={};   // cacheKey -> object URL (revoked on replace)
+
+function photoDb() {
+  if(_photoDb) return _photoDb;
+  _photoDb=new Promise((resolve,reject)=>{
+    const req=indexedDB.open(PHOTO_DB,1);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(PHOTO_STORE)) db.createObjectStore(PHOTO_STORE);
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+  return _photoDb;
+}
+
+function idbPut(key,val) {
+  return photoDb().then(db=>new Promise((res,rej)=>{
+    const tx=db.transaction(PHOTO_STORE,'readwrite');
+    tx.objectStore(PHOTO_STORE).put(val,key);
+    tx.oncomplete=()=>res(true); tx.onerror=()=>rej(tx.error);
+  }));
+}
+function idbGet(key) {
+  return photoDb().then(db=>new Promise((res,rej)=>{
+    const tx=db.transaction(PHOTO_STORE,'readonly');
+    const r=tx.objectStore(PHOTO_STORE).get(key);
+    r.onsuccess=()=>res(r.result||null); r.onerror=()=>rej(r.error);
+  }));
+}
+function idbDelete(key) {
+  return photoDb().then(db=>new Promise((res)=>{
+    const tx=db.transaction(PHOTO_STORE,'readwrite');
+    tx.objectStore(PHOTO_STORE).delete(key);
+    tx.oncomplete=()=>res(true); tx.onerror=()=>res(false);
+  }));
+}
+function idbEntries() {
+  return photoDb().then(db=>new Promise((res)=>{
+    const tx=db.transaction(PHOTO_STORE,'readonly');
+    const store=tx.objectStore(PHOTO_STORE);
+    const out=[];
+    const cur=store.openCursor();
+    cur.onsuccess=e=>{
+      const c=e.target.result;
+      if(!c){res(out);return;}
+      out.push({key:c.key,val:c.value});
+      c.continue();
+    };
+    cur.onerror=()=>res(out);
+  })).catch(()=>[]);
+}
+
+function cacheKey(jobId,storeKey){ return jobId+'|'+storeKey; }
+
+// Photo URLs are small, so unlike the old base64 blobs they stay in the payload.
+// Legacy p1..p3P2 keys are still stripped in case an old draft carries them.
 function jobWithoutPhotos(job) {
   const stripped = JSON.parse(JSON.stringify(job));
   const photoKeys = ['p1','p2L','p2P1','p2P2','p3L','p3P1','p3P2'];
@@ -277,20 +376,337 @@ function jobWithoutPhotos(job) {
 }
 
 try { jobs = JSON.parse(localStorage.getItem('scopingJobs2')||'[]'); } catch(e){}
-try { photoStore = JSON.parse(localStorage.getItem('scopingPhotos2')||'{}'); } catch(e){}
+jobs.forEach(j=>{ if(!j.photos) j.photos={}; });
 // coverPdfStore is session-only — PDFs are large and would blow localStorage
 
+// localStorage now only ever holds text, so it should never fill up. If it
+// somehow does we must NOT claim the draft was saved — that lie is what let a
+// day's scoping disappear behind a green "Saved" label.
 function saveStorage() {
   try {
     localStorage.setItem('scopingJobs2', JSON.stringify(jobs));
-    localStorage.setItem('scopingPhotos2', JSON.stringify(photoStore));
+    return true;
   } catch(e) {
-    try { localStorage.setItem('scopingJobs2', JSON.stringify(jobs)); } catch(e2){}
-    showToast('⚠ Storage full — photos may not persist. Other data saved.');
+    console.error('localStorage write failed:', e);
+    return false;
   }
 }
 
 function uid() { return '_'+Math.random().toString(36).slice(2,9); }
+
+// ════════════════════════════════════════════════════════
+//  SUPABASE — shared with the hub's job folder
+// ════════════════════════════════════════════════════════
+const SUPABASE_URL  = 'https://idvodclpwdabfgsqniwl.supabase.co';
+const SUPABASE_ANON  = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlkdm9kY2xwd2RhYmZnc3FuaXdsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA3NzU2NjcsImV4cCI6MjA5NjM1MTY2N30.cld1Y6S__aIO0xn1YfVmUzARthHJcbI8zlmhLRcBLuM';
+let SB = null;
+let _hubJobId  = null;   // jobs.id — sites and photos hang off this
+let _hubUser   = '';
+let _hubUserId = null;   // sites.created_by is NOT NULL, so inserts need this
+// Same origin as the hub, so this picks up the signed-in session that the hub
+// persisted. That matters: the `sites` policies are gated on is_approved(),
+// which needs a real auth.uid() — an anonymous client silently reads nothing.
+function sbReady() {
+  if(SB) return SB;
+  if(!window.supabase) return null;
+  SB = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false }
+  });
+  return SB;
+}
+function online(){ return navigator.onLine !== false; }
+
+// ── Legacy drafts ────────────────────────────────────────
+// Drafts made before photos moved to the gallery keep their bytes in
+// localStorage. Move them into IndexedDB so they still display and still print,
+// but mark them 'local' rather than 'pending': these photos were very often
+// also uploaded to the site gallery by hand, and auto-uploading would put a
+// second copy of every one of them in the bucket.
+async function migrateLegacyPhotos() {
+  let legacy=null;
+  try { legacy=JSON.parse(localStorage.getItem('scopingPhotos2')||'null'); } catch(e){}
+  if(!legacy) return;
+  let moved=0;
+  for(const jobId of Object.keys(legacy)) {
+    const job=jobs.find(j=>j.id===jobId);
+    if(!job) continue;
+    if(!job.photos) job.photos={};
+    for(const storeKey of Object.keys(legacy[jobId]||{})) {
+      const entry=legacy[jobId][storeKey];
+      if(!entry||!entry.src) continue;
+      try {
+        await idbPut(cacheKey(jobId,storeKey),{
+          blob:dataUrlToBlob(entry.src),
+          isLandscape:!!entry.isLandscape,
+          status:'local', photoId:null, url:null
+        });
+        if(!job.photos[storeKey]) job.photos[storeKey]={photoId:null,url:null,isLandscape:!!entry.isLandscape,localOnly:true};
+        moved++;
+      } catch(e){ console.error('legacy photo migration failed:',storeKey,e); }
+    }
+  }
+  if(moved) saveStorage();
+  // Only let go of the old copy once everything is safely in IndexedDB.
+  try { localStorage.removeItem('scopingPhotos2'); } catch(e){}
+  if(moved) showToast(`📷 ${moved} existing photo${moved!==1?'s':''} kept on this device`);
+}
+
+// ── Photo cache / upload queue ───────────────────────────
+function dataUrlToBlob(dataUrl) {
+  const [head,b64]=dataUrl.split(',');
+  const mime=(head.match(/:(.*?);/)||[,'image/jpeg'])[1];
+  const bin=atob(b64);
+  const bytes=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  return new Blob([bytes],{type:mime});
+}
+
+// Display source: cached blob wins (instant, works offline), remote URL otherwise.
+async function photoSrc(storeKey) {
+  if(!activeJob) return null;
+  const ck=cacheKey(activeJob.id,storeKey);
+  if(photoObjectUrls[ck]) return photoObjectUrls[ck];
+  try {
+    const rec=await idbGet(ck);
+    if(rec&&rec.blob) { const u=URL.createObjectURL(rec.blob); photoObjectUrls[ck]=u; return u; }
+  } catch(e){}
+  const meta=activeJob.photos?.[storeKey];
+  return meta&&meta.url?meta.url:null;
+}
+
+function forgetCachedUrl(ck) {
+  if(photoObjectUrls[ck]) { try{URL.revokeObjectURL(photoObjectUrls[ck]);}catch(e){} delete photoObjectUrls[ck]; }
+}
+
+// Which DB site does this photo slot belong to? Extra pages inherit their
+// parent site, so a photo added on an extra page still lands in the right
+// gallery rather than being orphaned.
+function siteIdForSlot(prefix) {
+  if(!activeJob) return null;
+  if((activeJob.sites||[]).some(s=>s.id===prefix)) return prefix;
+  const parent=(activeJob.sites||[]).find(s=>(s.extraPages||[]).some(ep=>ep.id===prefix));
+  return parent?parent.id:null;
+}
+
+function setSyncBadge(pending) {
+  const el=document.getElementById('photo-sync');
+  if(!el) return;
+  if(pending>0){ el.style.display=''; el.textContent=`↑ ${pending} photo${pending!==1?'s':''} to upload`; }
+  else el.style.display='none';
+}
+
+// Upload one cached blob into the job's site gallery and register it in
+// site_photos, so the photo shows up in the folder exactly as if it had been
+// added there. Returns the site_photos row, or null if it must stay queued.
+async function uploadPhotoToGallery(storeKey, rec) {
+  const sb=sbReady();
+  if(!sb||!_hubJobId||!online()) return null;
+  const siteId=siteIdForSlot(storeKey.split('_')[0]);
+  const path=`${_hubJobId}/${siteId||'general'}/${Date.now()}_${Math.random().toString(36).slice(2,7)}.jpg`;
+  try {
+    const {error:upErr}=await sb.storage.from('site-photos').upload(path, rec.blob, {contentType:'image/jpeg'});
+    if(upErr) throw upErr;
+    const {data:urlData}=sb.storage.from('site-photos').getPublicUrl(path);
+    const {data:row,error:insErr}=await sb.from('site_photos').insert({
+      job_id:_hubJobId, site_id:siteId||null, storage_path:path,
+      public_url:urlData.publicUrl, sort_order:rec.sortOrder||0,
+      created_by_name:_hubUser||'Scoping'
+    }).select('id,public_url').single();
+    if(insErr) throw insErr;
+    return row;
+  } catch(e) { console.error('photo upload failed:',e); return null; }
+}
+
+let _uploadsInFlight=0;
+// Push every queued photo for the open job. Safe to call repeatedly.
+async function flushPendingUploads() {
+  if(!activeJob||_uploadsInFlight||!online()) return;
+  _uploadsInFlight++;
+  try {
+    const entries=await idbEntries();
+    const mine=entries.filter(e=>e.key.startsWith(activeJob.id+'|')&&e.val&&e.val.status==='pending'&&e.val.blob);
+    setSyncBadge(mine.length);
+    let remaining=mine.length;
+    for(const {key,val} of mine) {
+      const storeKey=key.slice(activeJob.id.length+1);
+      const row=await uploadPhotoToGallery(storeKey,val);
+      if(!row) break;                       // offline / failed — stay queued
+      if(!activeJob.photos) activeJob.photos={};
+      activeJob.photos[storeKey]={photoId:row.id,url:row.public_url,isLandscape:!!val.isLandscape};
+      await idbPut(key,{...val,status:'synced',photoId:row.id,url:row.public_url});
+      remaining--;
+      setSyncBadge(remaining);
+      saveDraft();
+    }
+  } catch(e){ console.error('flushPendingUploads:',e); }
+  finally { _uploadsInFlight--; }
+}
+
+window.addEventListener('online',()=>{ flushPendingUploads(); retryHubSave(); });
+setInterval(()=>{ if(activeJob) flushPendingUploads(); }, 30000);
+
+// ════════════════════════════════════════════════════════
+//  SITES — the job folder's `sites` table is the one list
+// ════════════════════════════════════════════════════════
+// A scoping site card *is* a job folder site. Its Asset ID is the site name.
+// Sites created in the folder show up here; sites added here show up there.
+// Removing a site in scoping only hides it from this doc (excludedSites) —
+// the folder site and its gallery photos are never deleted from in here.
+
+function scopingSiteShell(dbSite) {
+  const s = defaultSite();
+  s.id = dbSite.id;              // uuid from `sites`
+  s.assetId = dbSite.name || '';
+  s.sortOrder = dbSite.sort_order || 0;
+  return s;
+}
+
+const UUID_RE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const normName=s=>String(s||'').trim().toLowerCase();
+
+// Drafts made before sites were linked use local ids like "_a1b2c3". Match them
+// to the folder site by Asset ID so their scoping answers and photos carry
+// over instead of being replaced by an empty card.
+function adoptLegacySite(row, legacy) {
+  const target=normName(row.name);
+  let hit=legacy.find(s=>normName(s.assetId)===target);
+  if(!hit) {
+    // Tolerate the folder carrying extra detail, e.g. "W13799 - TC4471".
+    hit=legacy.find(s=>{
+      const a=normName(s.assetId);
+      return a && (target.startsWith(a+' ') || target.startsWith(a+'-') || a.startsWith(target+' '));
+    });
+  }
+  return hit||null;
+}
+
+// Pull the job's sites and reconcile them into activeJob.sites, keeping all
+// scoping-specific answers already recorded against each site.
+async function syncSitesFromJob() {
+  const sb=sbReady();
+  if(!sb||!_hubJobId||!activeJob||!online()) return false;
+  let rows=[];
+  try {
+    const {data,error}=await sb.from('sites').select('id,name,sort_order')
+      .eq('job_id',_hubJobId).order('sort_order');
+    if(error) throw error;
+    rows=data||[];
+  } catch(e){ console.error('syncSitesFromJob:',e); return false; }
+  if(!rows.length) return false;   // nothing to reconcile against — leave as is
+
+  const excluded=new Set(activeJob.excludedSites||[]);
+  const byId={};
+  (activeJob.sites||[]).forEach(s=>{ byId[s.id]=s; });
+  // Candidates for name-based adoption: local-id sites not already matched.
+  const unclaimed=(activeJob.sites||[]).filter(s=>!UUID_RE.test(s.id)&&!s.pendingSite);
+
+  const merged=[];
+  const rekeys=[];
+  rows.forEach(r=>{
+    if(excluded.has(r.id)) return;
+    const existing=byId[r.id];
+    if(existing) {
+      existing.assetId=r.name||existing.assetId;   // name is shared, folder wins
+      existing.sortOrder=r.sort_order||0;
+      merged.push(existing);
+      return;
+    }
+    const legacy=adoptLegacySite(r,unclaimed);
+    if(legacy) {
+      unclaimed.splice(unclaimed.indexOf(legacy),1);
+      rekeys.push([legacy.id,r.id]);
+      legacy.id=r.id;
+      legacy.sortOrder=r.sort_order||0;
+      if(!legacy.assetId) legacy.assetId=r.name||'';
+      merged.push(legacy);
+    } else {
+      merged.push(scopingSiteShell(r));
+    }
+  });
+  // Sites captured offline, or local ones with no folder match, keep their place.
+  (activeJob.sites||[]).forEach(s=>{
+    if(!merged.includes(s)&&(s.pendingSite||unclaimed.includes(s))) merged.push(s);
+  });
+
+  activeJob.sites=merged;
+  for(const [oldId,newId] of rekeys) await rekeyPhotos(oldId,newId);
+  return true;
+}
+
+// Create the folder site for a scoping site added in the field.
+async function createJobSite(site) {
+  const sb=sbReady();
+  // created_by is NOT NULL — without a user id the insert would be rejected,
+  // so stay offline-pending rather than losing the site.
+  if(!sb||!_hubJobId||!_hubUserId||!online()) return false;
+  try {
+    const {data,error}=await sb.from('sites').insert({
+      job_id:_hubJobId,
+      name:site.assetId||'New site',
+      sort_order:site.sortOrder||0,
+      created_by:_hubUserId,
+      created_by_name:_hubUser||'Scoping'
+    }).select('id').single();
+    if(error) throw error;
+    // Re-key any photos already queued against the temporary id.
+    const oldId=site.id;
+    site.id=data.id;
+    delete site.pendingSite;
+    await rekeyPhotos(oldId,data.id);
+    return true;
+  } catch(e){ console.error('createJobSite:',e); return false; }
+}
+
+// Move queued photos/slot references from a temporary site id to the real uuid.
+async function rekeyPhotos(oldId,newId) {
+  if(!activeJob||oldId===newId) return;
+  const photos=activeJob.photos||{};
+  Object.keys(photos).forEach(k=>{
+    if(k.startsWith(oldId+'_')) {
+      photos[newId+'_'+k.slice(oldId.length+1)]=photos[k];
+      delete photos[k];
+    }
+  });
+  try {
+    const entries=await idbEntries();
+    for(const {key,val} of entries) {
+      const pfx=activeJob.id+'|'+oldId+'_';
+      if(key.startsWith(pfx)) {
+        await idbPut(activeJob.id+'|'+newId+'_'+key.slice(pfx.length), val);
+        await idbDelete(key);
+      }
+    }
+  } catch(e){}
+}
+
+// Asset ID is the site name — push renames back to the folder. The sites
+// UPDATE policy only allows the creator or an admin, so a site someone else
+// made will keep its folder name; say so once rather than diverging silently.
+const _renameTimers={};
+let _renameWarned=false;
+function pushSiteRename(site) {
+  const sb=sbReady();
+  if(!sb||!_hubJobId||site.pendingSite||!online()) return;
+  clearTimeout(_renameTimers[site.id]);
+  _renameTimers[site.id]=setTimeout(async ()=>{
+    const newName=site.assetId||'Untitled site';
+    const {data,error}=await sb.from('sites').update({name:newName}).eq('id',site.id).select('id');
+    if(error) { console.error('site rename failed:',error); return; }
+    if((!data||!data.length)&&!_renameWarned) {
+      _renameWarned=true;
+      showToast('ℹ Asset ID saved here, but the job folder site was created by someone else so its name is unchanged');
+    }
+  }, 1200);
+}
+
+// Any pending sites created while offline get their folder row once we're back.
+async function flushPendingSites() {
+  if(!activeJob||!online()) return;
+  const pending=(activeJob.sites||[]).filter(s=>s.pendingSite);
+  if(!pending.length) return;
+  for(const s of pending) await createJobSite(s);
+  saveDraft();
+}
 
 // ════════════════════════════════════════════════════════
 //  COVER PDF
@@ -336,7 +752,9 @@ function updateCoverPdfUI() {
 //  DEFAULT STRUCTURES
 // ════════════════════════════════════════════════════════
 function defaultJob() {
-  return { id:uid(), number500:'', jobName:'', sites:[], savedAt:null };
+  // photos: slot -> { photoId, url, isLandscape } into the job's site gallery
+  // excludedSites: folder sites deliberately left out of this scoping doc
+  return { id:uid(), number500:'', jobName:'', sites:[], photos:{}, excludedSites:[], savedAt:null };
 }
 
 function defaultSite() {
@@ -411,7 +829,7 @@ function renderLibrary() {
     const dt=j.savedAt?new Date(j.savedAt).toLocaleString('en-AU',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}):'Not saved';
     const card=document.createElement('div'); card.className='draft-card';
     card.innerHTML=`<div style="flex:1;min-width:0"><div class="draft-name">${lbl}</div><div class="draft-meta">Last saved: ${dt} · ${j.sites.length} site${j.sites.length!==1?'s':''}</div></div><div style="display:flex;align-items:center;gap:8px;flex-shrink:0"><span class="draft-badge">DRAFT</span><button class="lib-delete-btn">🗑</button></div>`;
-    card.querySelector('.lib-delete-btn').onclick=e=>{e.stopPropagation();confirmDelete('Delete this entire job draft?',()=>{jobs=jobs.filter(x=>x.id!==j.id);delete photoStore[j.id];delete coverPdfStore[j.id];saveStorage();renderLibrary();});};
+    card.querySelector('.lib-delete-btn').onclick=e=>{e.stopPropagation();confirmDelete('Delete this draft? Site photos stay in the job folder.',()=>{jobs=jobs.filter(x=>x.id!==j.id);delete coverPdfStore[j.id];dropCachedPhotos(j.id);saveStorage();renderLibrary();});};
     card.onclick=()=>openJob(j.id);
     list.appendChild(card);
   });
@@ -422,7 +840,6 @@ function renderLibrary() {
 // ════════════════════════════════════════════════════════
 function newJob() {
   activeJob=defaultJob();
-  photoStore[activeJob.id]={};
   loadFormFromJob(activeJob);
   showForm();
 }
@@ -430,9 +847,19 @@ function newJob() {
 function openJob(id) {
   activeJob=jobs.find(j=>j.id===id);
   if(!activeJob) return;
-  if(!photoStore[activeJob.id]) photoStore[activeJob.id]={};
+  if(!activeJob.photos) activeJob.photos={};
   loadFormFromJob(activeJob);
   showForm();
+}
+
+// Drop a job's cached photo bytes. The gallery copies are untouched.
+async function dropCachedPhotos(jobId) {
+  try {
+    const entries=await idbEntries();
+    for(const {key} of entries) {
+      if(key.startsWith(jobId+'|')) { forgetCachedUrl(key); await idbDelete(key); }
+    }
+  } catch(e){}
 }
 
 function collectFormData() {
@@ -446,8 +873,16 @@ function collectFormData() {
 
 function collectSiteFromDOM(site) {
   const sid=site.id;
+  // If this site's card is not on screen, every lookup below would return ''
+  // and overwrite good data with blanks — only assetId and location were
+  // guarded, which is why a wiped draft kept its asset IDs and nothing else.
+  // Never collect from a card that is not rendered.
+  if(!document.getElementById('sc-'+sid)) return;
   const aid=document.getElementById(`${sid}-assetId`);
-  if(aid) site.assetId=aid.value.trim();
+  if(aid) {
+    const newName=aid.value.trim();
+    if(newName!==site.assetId) { site.assetId=newName; pushSiteRename(site); }
+  }
   const loc=document.getElementById(`${sid}-location`);
   if(loc) site.location=loc.value.trim();
   const p2L=document.getElementById(`seg-${sid}-p2-L`);
@@ -529,6 +964,7 @@ function collectSiteFromDOM(site) {
 
 function collectExtraFromDOM(site,ep) {
   const eid=ep.id;
+  if(!document.getElementById('ep-'+eid)) return;   // not rendered — don't blank it
   const get=id=>document.getElementById(`${eid}-${id}`)?.value||'';
   // p1 is always landscape — no mode toggle needed
   const p2L=document.getElementById(`seg-${eid}-p2-L`);
@@ -538,6 +974,17 @@ function collectExtraFromDOM(site,ep) {
   ep.notes=get('notes');
 }
 
+// ── Saving ───────────────────────────────────────────────
+// The old version printed "Saved" the instant it had *asked* both stores to
+// write, without waiting for either to confirm. When localStorage was full and
+// the network write missed, a day's work vanished behind a green tick. Nothing
+// here reports success until something has actually confirmed it.
+let _saveSeq=0;              // increments per save; stale acks are ignored
+let _awaitingAck=0;          // seq we are waiting on, 0 when idle
+let _ackTimer=null;
+let _localOk=true;
+let _hubOk=true;
+
 function saveDraft() {
   if(!activeJob) return;
   clearTimeout(autoSaveTimer);
@@ -546,15 +993,47 @@ function saveDraft() {
   activeJob.savedAt=new Date().toISOString();
   const idx=jobs.findIndex(j=>j.id===activeJob.id);
   if(idx>=0) jobs[idx]=activeJob; else jobs.push(activeJob);
-  saveStorage();
+
+  _localOk=saveStorage();
+
+  const seq=++_saveSeq;
   if(_hubDocId && window.parent !== window) {
-    window.parent.postMessage({type:'DRAFT_SAVE',docId:_hubDocId,payload:jobWithoutPhotos(activeJob)},'*');
+    _awaitingAck=seq;
+    clearTimeout(_ackTimer);
+    // No ack in 15s means the write is in doubt — say so rather than lie.
+    _ackTimer=setTimeout(()=>{
+      if(_awaitingAck===seq) { _hubOk=false; _awaitingAck=0; setSaveStatus('done'); }
+    }, 15000);
+    window.parent.postMessage({type:'DRAFT_SAVE',docId:_hubDocId,seq,payload:jobWithoutPhotos(activeJob)},'*');
+  } else {
+    _hubOk=true;   // no hub attached — nothing to sync to, so nothing to fail
   }
-  setSaveStatus('saved');
+  setSaveStatus('done');
 }
 
-// Debounced autosave — fires 1.5s after the last change so edits (including
-// photos) survive if the user closes the tab or the hub iframe unloads.
+// Is there a job to sync to? Without one, localStorage is the only copy there
+// is, and losing it means losing the draft outright.
+function hasHub(){ return !!(_hubDocId && window.parent !== window); }
+
+window.addEventListener('message',e=>{
+  if(!e.data||e.data.type!=='DRAFT_SAVED') return;
+  if(e.data.seq && e.data.seq!==_awaitingAck) return;   // stale ack
+  clearTimeout(_ackTimer);
+  _awaitingAck=0;
+  _hubOk=e.data.ok!==false;
+  if(!_hubOk) console.error('hub draft save failed:', e.data.error);
+  setSaveStatus('done');
+});
+
+// Re-send the current draft after a failure or a reconnect.
+function retryHubSave() {
+  if(!activeJob||_hubOk||!_hubDocId||window.parent===window) return;
+  saveDraft();
+}
+setInterval(retryHubSave, 20000);
+
+// Debounced autosave — fires 1.5s after the last change so edits survive if
+// the user closes the tab or the hub iframe unloads.
 function scheduleSave() {
   if(!activeJob) return;
   setSaveStatus('pending');
@@ -565,9 +1044,17 @@ function scheduleSave() {
 function setSaveStatus(state) {
   const el=document.getElementById('save-status');
   if(!el) return;
-  if(state==='saving') el.textContent='Saving…';
-  else if(state==='pending') el.textContent='Unsaved changes…';
-  else el.textContent='Saved '+new Date().toLocaleTimeString('en-NZ',{hour:'2-digit',minute:'2-digit'});
+  if(state==='saving')      { el.textContent='Saving…'; el.style.color=''; return; }
+  if(state==='pending')     { el.textContent='Unsaved changes…'; el.style.color=''; return; }
+  // 'done' — report what actually happened.
+  // With no hub attached, localStorage is the only copy: if it failed, the
+  // draft is not saved anywhere and the user must be told plainly.
+  if(!_localOk && (!_hubOk || !hasHub())) { el.textContent='⚠ NOT SAVED — do not close this form'; el.style.color='#f87171'; return; }
+  if(!_hubOk)               { el.textContent='⚠ Saved on this device only — retrying sync'; el.style.color='#fbbf24'; return; }
+  if(!_localOk)             { el.textContent='Saved to the job — device backup unavailable'; el.style.color='#fbbf24'; return; }
+  if(_awaitingAck)          { el.textContent='Saving…'; el.style.color=''; return; }
+  el.textContent='Saved '+new Date().toLocaleTimeString('en-NZ',{hour:'2-digit',minute:'2-digit'});
+  el.style.color='';
 }
 
 // Flush any pending autosave immediately if the user backgrounds/closes the tab
@@ -592,24 +1079,39 @@ function loadFormFromJob(job) {
 // ════════════════════════════════════════════════════════
 //  ADD / REMOVE SITE
 // ════════════════════════════════════════════════════════
-function addSite() {
+// A new scoping site is also a new job folder site. It gets a temporary id so
+// it works offline, swapped for the real uuid once the folder row exists.
+async function addSite() {
   const site=defaultSite();
+  site.pendingSite=true;
+  site.sortOrder=(activeJob.sites||[]).length;
   activeJob.sites.push(site);
   renderSiteCard(site,activeJob);
-  // Scroll to it
   setTimeout(()=>document.getElementById('sc-'+site.id)?.scrollIntoView({behavior:'smooth',block:'start'}),100);
-  scheduleSave();
+  saveDraft();
+  if(await createJobSite(site)) {
+    // Re-render so the card carries the real uuid in its element ids.
+    loadFormFromJob(activeJob);
+    saveDraft();
+  }
 }
 
+// Removing a site here only takes it out of this scoping doc. The job folder
+// site and everything in its gallery are left alone.
 function removeSite(siteId) {
-  confirmDelete('Are you sure you want to delete this site section? All photos and information will be lost.',()=>{
+  confirmDelete('Remove this site from the scoping form?\n\nThe site and its photos stay in the job folder — only the scoping details entered here are cleared.',()=>{
+    const site=(activeJob.sites||[]).find(s=>s.id===siteId);
     activeJob.sites=activeJob.sites.filter(s=>s.id!==siteId);
+    // Remember the exclusion, or the site would reappear on the next sync.
+    if(site&&!site.pendingSite) {
+      if(!activeJob.excludedSites) activeJob.excludedSites=[];
+      if(!activeJob.excludedSites.includes(siteId)) activeJob.excludedSites.push(siteId);
+    }
     const card=document.getElementById('sc-'+siteId);
     if(card) card.remove();
-    // Clean photo store
-    const ps=photoStore[activeJob.id]||{};
-    Object.keys(ps).forEach(k=>{if(k.startsWith(siteId)) delete ps[k];});
-    scheduleSave();
+    clearSlotsWithPrefix(siteId);
+    (site?.extraPages||[]).forEach(ep=>clearSlotsWithPrefix(ep.id));
+    saveDraft();
   });
 }
 
@@ -620,18 +1122,30 @@ function addExtraPage(siteId) {
   site.extraPages.push(ep);
   renderExtraCard(site,ep,document.getElementById('extras-'+siteId));
   setTimeout(()=>document.getElementById('ep-'+ep.id)?.scrollIntoView({behavior:'smooth',block:'start'}),100);
-  scheduleSave();
+  saveDraft();
 }
 
 function removeExtraPage(siteId, epId) {
-  confirmDelete('Are you sure you want to delete this additional information section?',()=>{
+  confirmDelete('Remove this additional information page? Photos on it stay in the job folder.',()=>{
     const site=activeJob.sites.find(s=>s.id===siteId);
     if(site) site.extraPages=site.extraPages.filter(ep=>ep.id!==epId);
     const card=document.getElementById('ep-'+epId);
     if(card) card.remove();
-    const ps=photoStore[activeJob.id]||{};
-    Object.keys(ps).forEach(k=>{if(k.startsWith(epId)) delete ps[k];});
-    scheduleSave();
+    clearSlotsWithPrefix(epId);
+    saveDraft();
+  });
+}
+
+// Drop slot references (and any cached bytes) for a site or extra page.
+function clearSlotsWithPrefix(prefix) {
+  if(!activeJob) return;
+  const photos=activeJob.photos||{};
+  Object.keys(photos).forEach(k=>{
+    if(k.startsWith(prefix+'_')) {
+      delete photos[k];
+      const ck=cacheKey(activeJob.id,k);
+      forgetCachedUrl(ck); idbDelete(ck);
+    }
   });
 }
 
@@ -1163,10 +1677,9 @@ function renderSiteCard(site, job) {
   container.appendChild(card);
 
   // Restore photos for this site
-  const ps=photoStore[activeJob.id]||{};
+  const ps=activeJob.photos||{};
   ['p1','p2L','p2P1','p2P2','p3L','p3P1','p3P2'].forEach(key=>{
-    const storeKey=sid+'_'+key;
-    if(ps[storeKey]) renderPhotoBox(sid,key,ps[storeKey]);
+    if(ps[sid+'_'+key]) renderPhotoBox(sid,key);
   });
 
   // Render XARM forms
@@ -1257,39 +1770,44 @@ function renderExtraCard(site, ep, container) {
   container.appendChild(div);
 
   // Restore photos
-  const ps=photoStore[activeJob.id]||{};
+  const ps=activeJob.photos||{};
   ['p1','p2L','p2P1','p2P2','p3L','p3P1','p3P2'].forEach(key=>{
-    const storeKey=eid+'_'+key;
-    if(ps[storeKey]) renderPhotoBox(eid,key,ps[storeKey]);
+    if(ps[eid+'_'+key]) renderPhotoBox(eid,key);
   });
 }
 
 // ════════════════════════════════════════════════════════
 //  PHOTO BOX HTML BUILDER
 // ════════════════════════════════════════════════════════
-function photoBoxHTML(prefix, key, label, portrait) {
-  const small=portrait;
-  return `<div class="photo-box${portrait?' portrait':''}" id="pb-${prefix}_${key}">
+// Empty-slot markup. Shared by the initial render and by removePhoto so the
+// two can never drift apart.
+function photoBoxEmptyHTML(prefix, key, label, small) {
+  return `
     <input type="file" id="fi-${prefix}_${key}-gallery" accept="image/*" style="display:none" onchange="loadPhoto('${prefix}','${key}',this)">
     <input type="file" id="fi-${prefix}_${key}-camera" accept="image/*" capture="environment" style="display:none" onchange="loadPhoto('${prefix}','${key}',this)">
     <div class="photo-box-inner">
       <div class="photo-icon">📷</div>
-      ${!small?`<div class="photo-box-label">${label}</div>`:''}
+      ${!small&&label?`<div class="photo-box-label">${label}</div>`:''}
       <div class="photo-actions">
         <button class="photo-action-btn" onclick="document.getElementById('fi-${prefix}_${key}-camera').click()">${small?'📷':'📷 Camera'}</button>
-        <button class="photo-action-btn" onclick="document.getElementById('fi-${prefix}_${key}-gallery').click()">${small?'🖼':'🖼 Gallery'}</button>
+        <button class="photo-action-btn" onclick="document.getElementById('fi-${prefix}_${key}-gallery').click()">${small?'🖼':'🖼 Files'}</button>
+        <button class="photo-action-btn" onclick="openSitePicker('${prefix}','${key}')">${small?'🗂':'🗂 Site Photos'}</button>
       </div>
-    </div>
-  </div>`;
+    </div>`;
+}
+
+function photoBoxHTML(prefix, key, label, portrait) {
+  return `<div class="photo-box${portrait?' portrait':''}" id="pb-${prefix}_${key}">${photoBoxEmptyHTML(prefix,key,label,portrait)}</div>`;
 }
 
 // ════════════════════════════════════════════════════════
 //  PHOTO HANDLING
 // ════════════════════════════════════════════════════════
-// Photos are downscaled before storage — raw camera photos (often several MB
-// each) would blow past localStorage's quota within a site or two and get
-// silently dropped. 1800px longest side at 0.85 JPEG quality is still well
-// beyond what the PDF's photo quads need, but keeps drafts reliably saveable.
+// Photos are downscaled before upload — raw camera photos are often several MB
+// each. 1800px longest side at 0.85 JPEG quality is still well beyond what the
+// PDF's photo quads need. The bytes go to the job's site gallery; the slot only
+// keeps a reference, so a 13-site job costs a few KB of payload instead of
+// tens of MB of device storage.
 const PHOTO_MAX_DIM=1800, PHOTO_QUALITY=0.85;
 
 function loadPhoto(prefix, key, input) {
@@ -1297,7 +1815,7 @@ function loadPhoto(prefix, key, input) {
   const reader=new FileReader();
   reader.onload=e=>{
     const img=new Image();
-    img.onload=()=>{
+    img.onload=async ()=>{
       const isLandscape=img.width>=img.height;
       let w=img.width, h=img.height;
       if(w>PHOTO_MAX_DIM||h>PHOTO_MAX_DIM){
@@ -1307,11 +1825,9 @@ function loadPhoto(prefix, key, input) {
       const canvas=document.createElement('canvas');
       canvas.width=w; canvas.height=h;
       canvas.getContext('2d').drawImage(img,0,0,w,h);
-      const data={src:canvas.toDataURL('image/jpeg',PHOTO_QUALITY),isLandscape};
-      if(!photoStore[activeJob.id]) photoStore[activeJob.id]={};
-      photoStore[activeJob.id][prefix+'_'+key]=data;
-      renderPhotoBox(prefix,key,data);
-      scheduleSave();
+      const blob=await new Promise(res=>canvas.toBlob(res,'image/jpeg',PHOTO_QUALITY));
+      if(!blob) { showToast('⚠ Could not read that photo'); return; }
+      await attachPhoto(prefix,key,blob,isLandscape);
     };
     img.src=e.target.result;
   };
@@ -1319,30 +1835,120 @@ function loadPhoto(prefix, key, input) {
   input.value='';
 }
 
-function renderPhotoBox(prefix, key, photoData) {
-  const box=document.getElementById(`pb-${prefix}_${key}`);
-  if(!box) return;
-  box.innerHTML=`<div class="photo-overlay"><img src="${photoData.src}" alt="photo"><div class="photo-overlay-bar"><button class="photo-remove" onclick="removePhoto('${prefix}','${key}')">✕</button></div></div>`;
+// Cache the bytes first so the photo is safe and visible immediately, then
+// upload. If we're out of signal it stays queued and goes up later.
+async function attachPhoto(prefix, key, blob, isLandscape) {
+  if(!activeJob) return;
+  const storeKey=prefix+'_'+key;
+  const ck=cacheKey(activeJob.id,storeKey);
+  forgetCachedUrl(ck);
+  try {
+    await idbPut(ck,{blob,isLandscape,status:'pending',photoId:null,url:null});
+  } catch(e) {
+    console.error('photo cache failed:',e);
+    showToast('⚠ Could not store that photo on this device');
+    return;
+  }
+  if(!activeJob.photos) activeJob.photos={};
+  activeJob.photos[storeKey]={photoId:null,url:null,isLandscape:!!isLandscape};
+  await renderPhotoBox(prefix,key);
+  saveDraft();
+  flushPendingUploads();
 }
 
+// Attach a photo that is already in the site gallery — no upload, no copy.
+async function attachExistingPhoto(prefix, key, photo) {
+  if(!activeJob) return;
+  const storeKey=prefix+'_'+key;
+  const ck=cacheKey(activeJob.id,storeKey);
+  forgetCachedUrl(ck);
+  await idbDelete(ck);
+  if(!activeJob.photos) activeJob.photos={};
+  activeJob.photos[storeKey]={photoId:photo.id,url:photo.public_url,isLandscape:photo.isLandscape!==false};
+  await renderPhotoBox(prefix,key);
+  saveDraft();
+}
+
+async function renderPhotoBox(prefix, key) {
+  const box=document.getElementById(`pb-${prefix}_${key}`);
+  if(!box) return;
+  const storeKey=prefix+'_'+key;
+  const src=await photoSrc(storeKey);
+  if(!src) return;
+  const meta=activeJob?.photos?.[storeKey]||{};
+  let badge='';
+  if(meta.localOnly)     badge='<div class="photo-pending" title="On this device only — not in the site gallery">📱</div>';
+  else if(!meta.photoId) badge='<div class="photo-pending" title="Waiting to upload to the site gallery">↑</div>';
+  box.innerHTML=`<div class="photo-overlay"><img src="${src}" alt="photo">${badge}<div class="photo-overlay-bar"><button class="photo-remove" onclick="removePhoto('${prefix}','${key}')">✕</button></div></div>`;
+}
+
+// Clears the slot only. The photo stays in the site gallery — scoping never
+// deletes from the folder.
 function removePhoto(prefix, key) {
-  const ps=photoStore[activeJob?.id];
-  if(ps) delete ps[prefix+'_'+key];
+  const storeKey=prefix+'_'+key;
+  if(activeJob?.photos) delete activeJob.photos[storeKey];
+  if(activeJob) { const ck=cacheKey(activeJob.id,storeKey); forgetCachedUrl(ck); idbDelete(ck); }
   const box=document.getElementById(`pb-${prefix}_${key}`);
   if(!box) return;
   // Reset to empty state
   const portrait=box.classList.contains('portrait');
-  box.innerHTML=`
-    <input type="file" id="fi-${prefix}_${key}-gallery" accept="image/*" style="display:none" onchange="loadPhoto('${prefix}','${key}',this)">
-    <input type="file" id="fi-${prefix}_${key}-camera" accept="image/*" capture="environment" style="display:none" onchange="loadPhoto('${prefix}','${key}',this)">
-    <div class="photo-box-inner">
-      <div class="photo-icon">📷</div>
-      <div class="photo-actions">
-        <button class="photo-action-btn" onclick="document.getElementById('fi-${prefix}_${key}-camera').click()">${portrait?'📷':'📷 Camera'}</button>
-        <button class="photo-action-btn" onclick="document.getElementById('fi-${prefix}_${key}-gallery').click()">${portrait?'🖼':'🖼 Gallery'}</button>
-      </div>
-    </div>`;
-  scheduleSave();
+  box.innerHTML=photoBoxEmptyHTML(prefix,key,'',portrait);
+  saveDraft();
+}
+
+// ── Site gallery picker ──────────────────────────────────
+// Lists the photos already on this site so a slot can reuse one instead of
+// making a second copy of a photo the job folder already holds.
+let _pickerTarget=null;
+
+async function openSitePicker(prefix, key) {
+  _pickerTarget={prefix,key};
+  const modal=document.getElementById('site-picker');
+  const grid=document.getElementById('site-picker-grid');
+  modal.style.display='flex';
+  grid.innerHTML='<div class="sp-empty">Loading…</div>';
+
+  const sb=sbReady();
+  const siteId=siteIdForSlot(prefix);
+  if(!sb||!_hubJobId) { grid.innerHTML='<div class="sp-empty">Site photos are only available when this form is opened from a job.</div>'; return; }
+  if(!online())        { grid.innerHTML='<div class="sp-empty">No connection — take a photo instead and it will upload when you\'re back in range.</div>'; return; }
+
+  try {
+    let q=sb.from('site_photos').select('id,public_url,caption').eq('job_id',_hubJobId);
+    q = siteId ? q.eq('site_id',siteId) : q.is('site_id',null);
+    const {data:photos=[],error}=await q.order('sort_order').order('created_at');
+    if(error) throw error;
+    if(!photos.length) { grid.innerHTML='<div class="sp-empty">No photos on this site yet. Photos you take here will appear in the job folder too.</div>'; return; }
+    grid.innerHTML='';
+    photos.forEach((p,i)=>{
+      const card=document.createElement('div');
+      card.className='sp-thumb';
+      card.innerHTML=`<img src="${p.public_url}" loading="lazy" alt=""><div class="sp-cap">${esc((p.caption||'').trim()||'Photo '+(i+1))}</div>`;
+      card.onclick=()=>choosePickedPhoto(p);
+      grid.appendChild(card);
+    });
+  } catch(e) {
+    console.error('site picker:',e);
+    grid.innerHTML='<div class="sp-empty">Could not load site photos.</div>';
+  }
+}
+
+function closeSitePicker() {
+  document.getElementById('site-picker').style.display='none';
+  _pickerTarget=null;
+}
+
+// Orientation decides which PDF quad layout the photo suits, so measure it.
+function choosePickedPhoto(photo) {
+  if(!_pickerTarget) return;
+  const {prefix,key}=_pickerTarget;
+  const probe=new Image();
+  probe.onload=()=>{
+    attachExistingPhoto(prefix,key,{...photo,isLandscape:probe.width>=probe.height});
+  };
+  probe.onerror=()=>attachExistingPhoto(prefix,key,{...photo,isLandscape:true});
+  probe.src=photo.public_url;
+  closeSitePicker();
 }
 
 function setPhotoMode(prefix, group, mode) {
@@ -1542,9 +2148,23 @@ async function generatePDF(){
     const pdf=new jsPDF({orientation:'landscape',unit:'mm',format:'a3'});
     const PW=420,PH=297,margin=10,headerH=14,gap=4;
 
-    const ps=photoStore[activeJob.id]||{};
+    // Resolve every slot to a drawable source up front: cached bytes if this
+    // device has them, otherwise the gallery URL.
+    const ps={};
+    for(const storeKey of Object.keys(activeJob.photos||{})) {
+      ps[storeKey]=await photoSrc(storeKey);
+    }
 
-    function loadImgEl(src){return new Promise(res=>{if(!src){res(null);return;}const img=new Image();img.onload=()=>res(img);img.onerror=()=>res(null);img.src=src;});}
+    // Gallery URLs are cross-origin, so the image must be CORS-loaded or the
+    // canvas is tainted and toDataURL throws when building the page.
+    function loadImgEl(src){return new Promise(res=>{
+      if(!src){res(null);return;}
+      const img=new Image();
+      if(/^https?:/i.test(src)) img.crossOrigin='anonymous';
+      img.onload=()=>res(img);
+      img.onerror=()=>res(null);
+      img.src=src;
+    });}
 
     async function drawPage(assetId, p1src, p2mode, p2Lsrc, p2P1src, p2P2src, p3mode, p3Lsrc, p3P1src, p3P2src, infoLines, infoTitle){
       const gridTop=headerH+3+gap;
@@ -1737,9 +2357,9 @@ async function generatePDF(){
 
       await drawPage(
         site.assetId,
-        ps[sid+'_p1']?.src||null,
-        site.photo2Mode, ps[sid+'_p2L']?.src||null, ps[sid+'_p2P1']?.src||null, ps[sid+'_p2P2']?.src||null,
-        site.photo3Mode, ps[sid+'_p3L']?.src||null, ps[sid+'_p3P1']?.src||null, ps[sid+'_p3P2']?.src||null,
+        ps[sid+'_p1']||null,
+        site.photo2Mode, ps[sid+'_p2L']||null, ps[sid+'_p2P1']||null, ps[sid+'_p2P2']||null,
+        site.photo3Mode, ps[sid+'_p3L']||null, ps[sid+'_p3P1']||null, ps[sid+'_p3P2']||null,
         infoLines, 'Site Information'
       );
 
@@ -1750,9 +2370,9 @@ async function generatePDF(){
         const epInfoLines=ep.notes?ep.notes.split('\n').filter(l=>l.trim()):['No additional notes'];
         await drawPage(
           site.assetId+' — Additional Info',
-          ps[eid+'_p1']?.src||null,
-          ep.photo2Mode, ps[eid+'_p2L']?.src||null, ps[eid+'_p2P1']?.src||null, ps[eid+'_p2P2']?.src||null,
-          ep.photo3Mode, ps[eid+'_p3L']?.src||null, ps[eid+'_p3P1']?.src||null, ps[eid+'_p3P2']?.src||null,
+          ps[eid+'_p1']||null,
+          ep.photo2Mode, ps[eid+'_p2L']||null, ps[eid+'_p2P1']||null, ps[eid+'_p2P2']||null,
+          ep.photo3Mode, ps[eid+'_p3L']||null, ps[eid+'_p3P1']||null, ps[eid+'_p3P2']||null,
           epInfoLines, 'Notes'
         );
       }
@@ -2104,9 +2724,66 @@ function showToast(msg){const t=document.getElementById('toast');t.textContent=m
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 
 // ════════════════════════════════════════════════════════
+//  MERGE — server payload vs local draft
+// ════════════════════════════════════════════════════════
+// Opening a doc used to overwrite the local draft with whatever the server
+// held. If the server copy was the damaged one, that destroyed the last good
+// backup. Merging never replaces something with nothing.
+function isEmptyVal(v) {
+  if(v===null||v===undefined||v==='') return true;
+  if(Array.isArray(v)) return v.length===0;
+  if(typeof v==='object') return Object.keys(v).length===0;
+  return false;
+}
+
+// Prefer `primary`, but fall back to `backup` field by field wherever primary
+// has nothing to say.
+function mergeDeep(primary, backup) {
+  if(backup===undefined) return primary;
+  if(isEmptyVal(primary)&&!isEmptyVal(backup)) return backup;
+  if(primary&&backup&&typeof primary==='object'&&typeof backup==='object'&&!Array.isArray(primary)&&!Array.isArray(backup)) {
+    const out={...primary};
+    Object.keys(backup).forEach(k=>{ out[k]=mergeDeep(primary[k],backup[k]); });
+    return out;
+  }
+  return primary;
+}
+
+function mergeJobs(serverJob, localJob) {
+  if(!localJob) return serverJob;
+  if(!serverJob) return localJob;
+  // Whichever was saved later leads; the other fills its gaps.
+  const serverNewer=!localJob.savedAt||(serverJob.savedAt&&serverJob.savedAt>=localJob.savedAt);
+  const primary=serverNewer?serverJob:localJob;
+  const backup =serverNewer?localJob:serverJob;
+
+  const merged=mergeDeep(primary,backup);
+  // Sites are matched by id, not position, so a reordered list can't scramble.
+  const bySiteId={};
+  (backup.sites||[]).forEach(s=>{ bySiteId[s.id]=s; });
+  merged.sites=(primary.sites||[]).map(s=>{
+    const other=bySiteId[s.id];
+    if(!other) return s;
+    const m=mergeDeep(s,other);
+    const byEpId={};
+    (other.extraPages||[]).forEach(ep=>{ byEpId[ep.id]=ep; });
+    m.extraPages=(s.extraPages||[]).map(ep=>byEpId[ep.id]?mergeDeep(ep,byEpId[ep.id]):ep);
+    (other.extraPages||[]).forEach(ep=>{ if(!(s.extraPages||[]).some(x=>x.id===ep.id)) m.extraPages.push(ep); });
+    return m;
+  });
+  // Sites only the backup knows about are kept rather than dropped.
+  (backup.sites||[]).forEach(s=>{
+    if(!(primary.sites||[]).some(x=>x.id===s.id) && !(merged.excludedSites||[]).includes(s.id)) merged.sites.push(s);
+  });
+  merged.photos=mergeDeep(primary.photos||{}, backup.photos||{});
+  return merged;
+}
+
+// ════════════════════════════════════════════════════════
 //  INIT
 // ════════════════════════════════════════════════════════
 showLibrary();
+migrateLegacyPhotos();
 
 // Delegated autosave — catches every current and future field inside the
 // form (site cards, extra pages, sub-forms) without wiring each one by hand.
@@ -2118,17 +2795,29 @@ document.getElementById('view-form').addEventListener('change', scheduleSave);
 (function(){
   function applyContext(ctx) {
     if (ctx.docId) _hubDocId = ctx.docId;
+    if (ctx.jobId) _hubJobId = ctx.jobId;
+    if (ctx.userName) _hubUser = ctx.userName;
+    if (ctx.userId) _hubUserId = ctx.userId;
 
-    var apply = function() {
+    var apply = async function() {
       // If hub sent a saved payload, restore the job and open editor directly
       if (ctx.payload && ctx.payload.id) {
-        activeJob = JSON.parse(JSON.stringify(ctx.payload));
-        var idx = jobs.findIndex(function(j){ return j.id === activeJob.id; });
+        var server = JSON.parse(JSON.stringify(ctx.payload));
+        var idx = jobs.findIndex(function(j){ return j.id === server.id; });
+        var local = idx >= 0 ? jobs[idx] : null;
+        // Merge rather than overwrite — the local copy may hold text the
+        // server lost, and vice versa.
+        activeJob = mergeJobs(server, local);
+        if (!activeJob.photos) activeJob.photos = {};
         if (idx >= 0) jobs[idx] = activeJob; else jobs.push(activeJob);
         saveStorage();
-        if (!photoStore[activeJob.id]) photoStore[activeJob.id] = {};
+        await syncSitesFromJob();
         loadFormFromJob(activeJob);
         showForm();
+        // If the merge recovered anything the server was missing, push it back.
+        if (local) saveDraft();
+        flushPendingSites();
+        flushPendingUploads();
         return;
       }
       // No payload — brand-new doc. Create and show the job form first,
@@ -2147,6 +2836,9 @@ document.getElementById('view-form').addEventListener('change', scheduleSave);
       var wo = (ctx.wo || '').replace(/\D/g, '').slice(0, 8);
       setVal('f-number500', wo);
       setVal('f-jobName',   ctx.name);
+      // Sites already in the job folder show up here straight away, so a
+      // scoping doc started after the sites were listed isn't blank.
+      if (await syncSitesFromJob()) { loadFormFromJob(activeJob); saveDraft(); }
     };
     if (document.getElementById('f-number500')) apply();
     else document.addEventListener('DOMContentLoaded', apply);
